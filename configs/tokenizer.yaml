@@ -1,0 +1,9 @@
+# SentencePiece tokenizer — trained on TRAIN text only
+vocab_size: 8000
+model_type: bpe
+character_coverage: 0.9995
+input_sentence_size: 1000000
+pad_id: 0
+bos_id: 1
+eos_id: 2
+unk_id: 3

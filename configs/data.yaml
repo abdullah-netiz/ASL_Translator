@@ -1,0 +1,27 @@
+# Paths (relative to project root)
+data_root: data
+raw_video_dirs:
+  train: data/raw/videos/train/train_rgb_front_clips/raw_videos
+  val:   data/raw/videos/val/val_rgb_front_clips/raw_videos
+  test:  data/raw/videos/test/test_rgb_front_clips/raw_videos
+translation_csvs:
+  train: data/raw/translations/how2sign_train.csv
+  val:   data/raw/translations/how2sign_val.csv
+  test:  data/raw/translations/how2sign_test.csv
+landmark_dirs:
+  train: data/landmarks/train
+  val:   data/landmarks/val
+  test:  data/landmarks/test
+manifest_dir: data/manifests
+tokenizer_dir: data/tokenizer
+
+# Extraction
+fps_target: 15        # sample every other frame from 30fps
+video_fps: 30
+stride: 2
+max_seq_len: 256      # cap; log clips that exceed this
+min_seq_len: 4        # discard clips shorter than this
+num_workers: 16       # parallel extraction processes (28 cores available)
+
+# Quality control
+min_hand_detection_rate: 0.3   # flag clips below this fraction
