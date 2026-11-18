@@ -7,7 +7,8 @@ import { ASLWebSocketClient } from "./socket.js";
 
 // DOM Elements
 const videoEl = document.getElementById("webcam-video");
-const ipcamImgEl = document.getElementById("ipcam-feed");
+const ipcamCanvasEl = document.getElementById("ipcam-canvas");
+const ipcamCtx = ipcamCanvasEl ? ipcamCanvasEl.getContext("2d") : null;
 const canvasEl = document.getElementById("overlay-canvas");
 const canvasCtx = canvasEl ? canvasEl.getContext("2d") : null;
 
@@ -24,6 +25,7 @@ const selectSampleClip = document.getElementById("select-sample-clip");
 const connDot = document.getElementById("conn-dot");
 const connText = document.getElementById("conn-text");
 const hudStatus = document.getElementById("hud-status");
+const hudHands = document.getElementById("hud-hands");
 const hudFps = document.getElementById("hud-fps");
 const bannerText = document.getElementById("banner-text");
 const bannerMeta = document.getElementById("banner-meta");
@@ -34,7 +36,7 @@ const valDevice = document.getElementById("val-device");
 const valLatency = document.getElementById("val-latency");
 const valSentences = document.getElementById("val-sentences");
 
-// Offscreen canvas for clean snapshot capture of MJPEG IP Webcam frames
+// Offscreen canvas for clean snapshot capture of IP Webcam frames
 const offscreenCanvas = document.createElement("canvas");
 const offscreenCtx = offscreenCanvas.getContext("2d");
 
@@ -44,7 +46,9 @@ let wsClient = null;
 let camera = null;
 let isCameraRunning = false;
 let isIpcamRunning = false;
+let ipcamAbortController = null;
 let isProcessingFrame = false;
+let hasReceivedHolisticResult = false;
 let isMirrored = true;
 let sentenceCount = 0;
 let simulationInterval = null;
@@ -78,9 +82,9 @@ function initMediaPipe() {
     smoothLandmarks: true,
     enableSegmentation: false,
     smoothSegmentation: false,
-    refineFaceLandmarks: true,
-    minDetectionConfidence: 0.5,
-    minTrackingConfidence: 0.5,
+    refineFaceLandmarks: false,
+    minDetectionConfidence: 0.35,
+    minTrackingConfidence: 0.35,
   });
 
   holistic.onResults(onHolisticResults);
@@ -89,6 +93,17 @@ function initMediaPipe() {
 
 function onHolisticResults(results) {
   const now = performance.now();
+  hasReceivedHolisticResult = true;
+
+  // Immediate local detection HUD feedback (no server round-trip delay)
+  const hasPose = Boolean(results.poseLandmarks && results.poseLandmarks.length >= 13);
+  const hasLh = Boolean(results.leftHandLandmarks && results.leftHandLandmarks.length === 21);
+  const hasRh = Boolean(results.rightHandLandmarks && results.rightHandLandmarks.length === 21);
+
+  if (hudHands) {
+    hudHands.textContent = `Pose: ${hasPose ? "✓" : "–"} | L: ${hasLh ? "✓" : "–"} | R: ${hasRh ? "✓" : "–"}`;
+    hudHands.className = (hasLh || hasRh) ? "hud-tag hud-detected" : "hud-tag";
+  }
 
   // Draw landmarks on overlay canvas
   drawLandmarks(results);
@@ -212,7 +227,7 @@ async function startCamera() {
     });
 
     videoEl.classList.remove("hidden");
-    if (ipcamImgEl) ipcamImgEl.classList.add("hidden");
+    if (ipcamCanvasEl) ipcamCanvasEl.classList.add("hidden");
 
     videoEl.srcObject = stream;
     await videoEl.play();
@@ -223,6 +238,7 @@ async function startCamera() {
     }
 
     isCameraRunning = true;
+    hasReceivedHolisticResult = false;
     if (btnToggleCamera) {
       btnToggleCamera.textContent = "Stop Local Camera";
       btnToggleCamera.classList.add("btn-danger");
@@ -269,7 +285,178 @@ function stopCamera() {
     btnToggleCamera.classList.remove("btn-danger");
   }
   if (hudStatus) hudStatus.textContent = "Camera Off";
+  if (hudHands) {
+    hudHands.textContent = "Pose: – | L: – | R: –";
+    hudHands.className = "hud-tag";
+  }
   normalizer.reset();
+}
+
+// ---------------------------------------------------------------------------
+// IP Webcam MJPEG Stream Decoder (works identically in Firefox & Chrome)
+// ---------------------------------------------------------------------------
+
+function concatUint8(a, b) {
+  const out = new Uint8Array(a.length + b.length);
+  out.set(a, 0);
+  out.set(b, a.length);
+  return out;
+}
+
+function findBytes(buf, pattern, start = 0) {
+  const limit = buf.length - pattern.length;
+  for (let i = start; i <= limit; i++) {
+    let match = true;
+    for (let j = 0; j < pattern.length; j++) {
+      if (buf[i + j] !== pattern[j]) {
+        match = false;
+        break;
+      }
+    }
+    if (match) return i;
+  }
+  return -1;
+}
+
+function findLastJpegEoi(buf) {
+  for (let i = buf.length - 2; i >= 0; i--) {
+    if (buf[i] === 0xff && buf[i + 1] === 0xd9) {
+      return i + 2;
+    }
+  }
+  return -1;
+}
+
+async function renderAndProcessBitmap(bitmap) {
+  const w = bitmap.width;
+  const h = bitmap.height;
+
+  if (ipcamCanvasEl && ipcamCtx) {
+    if (ipcamCanvasEl.width !== w || ipcamCanvasEl.height !== h) {
+      ipcamCanvasEl.width = w;
+      ipcamCanvasEl.height = h;
+    }
+    ipcamCtx.drawImage(bitmap, 0, 0, w, h);
+  }
+
+  if (canvasEl && (canvasEl.width !== w || canvasEl.height !== h)) {
+    canvasEl.width = w;
+    canvasEl.height = h;
+  }
+
+  if (!isProcessingFrame && holistic) {
+    if (offscreenCanvas.width !== w || offscreenCanvas.height !== h) {
+      offscreenCanvas.width = w;
+      offscreenCanvas.height = h;
+    }
+    offscreenCtx.drawImage(bitmap, 0, 0, w, h);
+
+    if (!hasReceivedHolisticResult && hudStatus) {
+      hudStatus.textContent = "Loading MediaPipe AI model...";
+    }
+
+    isProcessingFrame = true;
+    holistic
+      .send({ image: offscreenCanvas })
+      .catch((err) => {
+        console.error("MediaPipe Holistic frame error:", err);
+        setIpcamStatus(`MediaPipe error: ${err.message || err}`, "error");
+      })
+      .finally(() => {
+        isProcessingFrame = false;
+      });
+  }
+
+  bitmap.close();
+}
+
+async function consumeMjpegStream(response, resolvedUrl) {
+  const contentType = response.headers.get("content-type") || "";
+  const boundaryMatch = contentType.match(/boundary=["']?([^;"'\s]+)["']?/i);
+  const encoder = new TextEncoder();
+  let boundaryBytes = null;
+  if (boundaryMatch) {
+    const rawBoundary = boundaryMatch[1].replace(/^--/, "");
+    boundaryBytes = encoder.encode(`--${rawBoundary}`);
+  }
+  const soiMarker = new Uint8Array([0xff, 0xd8]);
+  const eoiMarker = new Uint8Array([0xff, 0xd9]);
+
+  const reader = response.body.getReader();
+  let buffer = new Uint8Array(0);
+  const MAX_BUFFER_BYTES = 4 * 1024 * 1024;
+
+  try {
+    while (isIpcamRunning) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      if (!value || value.length === 0) continue;
+
+      buffer = concatUint8(buffer, value);
+      if (buffer.length > MAX_BUFFER_BYTES) {
+        // Drop stale backlog if consumer ever falls behind
+        buffer = buffer.slice(buffer.length - 512 * 1024);
+      }
+
+      // Extract all complete JPEG frames currently in buffer; render only the latest to keep latency zero
+      let latestJpeg = null;
+
+      if (boundaryBytes) {
+        while (true) {
+          const b1 = findBytes(buffer, boundaryBytes, 0);
+          if (b1 === -1) break;
+          const b2 = findBytes(buffer, boundaryBytes, b1 + boundaryBytes.length);
+          if (b2 === -1) {
+            if (b1 > 0) buffer = buffer.slice(b1);
+            break;
+          }
+          const part = buffer.slice(b1 + boundaryBytes.length, b2);
+          buffer = buffer.slice(b2);
+
+          const soi = findBytes(part, soiMarker, 0);
+          const eoiEnd = findLastJpegEoi(part);
+          if (soi !== -1 && eoiEnd > soi + 2) {
+            latestJpeg = part.slice(soi, eoiEnd);
+          }
+        }
+      } else {
+        while (true) {
+          const soi = findBytes(buffer, soiMarker, 0);
+          if (soi === -1) {
+            buffer = new Uint8Array(0);
+            break;
+          }
+          const eoi = findBytes(buffer, eoiMarker, soi + 2);
+          if (eoi === -1) {
+            if (soi > 0) buffer = buffer.slice(soi);
+            break;
+          }
+          latestJpeg = buffer.slice(soi, eoi + 2);
+          buffer = buffer.slice(eoi + 2);
+        }
+      }
+
+      if (latestJpeg) {
+        try {
+          const blob = new Blob([latestJpeg], { type: "image/jpeg" });
+          const bitmap = await createImageBitmap(blob);
+          await renderAndProcessBitmap(bitmap);
+        } catch (decodeErr) {
+          console.debug("Skipped partial JPEG frame:", decodeErr);
+        }
+      }
+    }
+  } catch (err) {
+    if (err.name !== "AbortError" && isIpcamRunning) {
+      console.error("IP Webcam stream error:", err);
+      setIpcamStatus(`Stream interrupted (${resolvedUrl}): ${err.message}`, "error");
+      stopIpcam(true);
+    }
+  } finally {
+    try {
+      await reader.cancel();
+    } catch (_) {}
+  }
 }
 
 async function toggleIpcam() {
@@ -281,7 +468,7 @@ async function toggleIpcam() {
 }
 
 async function startIpcam() {
-  if (!ipcamImgEl || !holistic) {
+  if (!ipcamCanvasEl || !holistic) {
     setIpcamStatus("MediaPipe Holistic is still loading — please wait a second and retry.", "error");
     return;
   }
@@ -322,20 +509,20 @@ async function startIpcam() {
       inputIpcamUrl.value = resolvedUrl;
     }
 
-    // Show IP Webcam feed proxied via same-origin FastAPI server
-    if (videoEl) videoEl.classList.add("hidden");
-    ipcamImgEl.classList.remove("hidden");
-
+    // Open streaming proxy connection via ReadableStream (bypasses img.complete & Firefox MJPEG bugs)
+    ipcamAbortController = new AbortController();
     const proxyUrl = `/api/ipcam/stream?url=${encodeURIComponent(resolvedUrl)}&t=${Date.now()}`;
-    ipcamImgEl.onerror = () => {
-      if (isIpcamRunning) {
-        setIpcamStatus(`IP Webcam stream interrupted (${resolvedUrl}). Check phone app & Wi-Fi.`, "error");
-        stopIpcam(true);
-      }
-    };
-    ipcamImgEl.src = proxyUrl;
+    const streamRes = await fetch(proxyUrl, { signal: ipcamAbortController.signal });
+
+    if (!streamRes.ok || !streamRes.body) {
+      throw new Error(`Proxy returned HTTP ${streamRes.status}`);
+    }
+
+    if (videoEl) videoEl.classList.add("hidden");
+    ipcamCanvasEl.classList.remove("hidden");
 
     isIpcamRunning = true;
+    hasReceivedHolisticResult = false;
     normalizer.reset();
     if (wsClient) wsClient.sendReset();
 
@@ -345,48 +532,14 @@ async function startIpcam() {
       btnToggleIpcam.classList.remove("btn-cyan");
       btnToggleIpcam.classList.add("btn-danger");
     }
-    setIpcamStatus(`Connected to ${resolvedUrl}`, "connected");
+    setIpcamStatus(`Connected to ${resolvedUrl} — streaming frames to MediaPipe`, "connected");
     if (hudStatus) hudStatus.textContent = "IP Webcam Active";
 
-    // Frame extraction loop: draw current MJPEG frame to offscreen canvas and send to MediaPipe
-    async function ipcamFrameLoop() {
-      if (!isIpcamRunning) return;
-
-      if (
-        ipcamImgEl.complete &&
-        ipcamImgEl.naturalWidth > 0 &&
-        ipcamImgEl.naturalHeight > 0 &&
-        !isProcessingFrame
-      ) {
-        const w = ipcamImgEl.naturalWidth;
-        const h = ipcamImgEl.naturalHeight;
-
-        if (offscreenCanvas.width !== w || offscreenCanvas.height !== h) {
-          offscreenCanvas.width = w;
-          offscreenCanvas.height = h;
-        }
-        if (canvasEl && (canvasEl.width !== w || canvasEl.height !== h)) {
-          canvasEl.width = w;
-          canvasEl.height = h;
-        }
-
-        isProcessingFrame = true;
-        try {
-          offscreenCtx.drawImage(ipcamImgEl, 0, 0, w, h);
-          await holistic.send({ image: offscreenCanvas });
-        } catch (err) {
-          console.error("IP Webcam frame processing error:", err);
-        } finally {
-          isProcessingFrame = false;
-        }
-      }
-
-      requestAnimationFrame(ipcamFrameLoop);
-    }
-    requestAnimationFrame(ipcamFrameLoop);
-
+    // Start async MJPEG frame reader loop
+    consumeMjpegStream(streamRes, resolvedUrl);
     console.log("IP Webcam connected:", resolvedUrl);
   } catch (err) {
+    if (err.name === "AbortError") return;
     console.error("IP Webcam connection error:", err);
     setIpcamStatus(`Connection error: ${err.message}`, "error");
     if (btnToggleIpcam) {
@@ -398,10 +551,15 @@ async function startIpcam() {
 
 function stopIpcam(preserveStatus = false) {
   isIpcamRunning = false;
-  if (ipcamImgEl) {
-    ipcamImgEl.onerror = null;
-    ipcamImgEl.src = "";
-    ipcamImgEl.classList.add("hidden");
+  if (ipcamAbortController) {
+    ipcamAbortController.abort();
+    ipcamAbortController = null;
+  }
+  if (ipcamCanvasEl) {
+    if (ipcamCtx) {
+      ipcamCtx.clearRect(0, 0, ipcamCanvasEl.width, ipcamCanvasEl.height);
+    }
+    ipcamCanvasEl.classList.add("hidden");
   }
   if (videoEl) {
     videoEl.classList.remove("hidden");
@@ -419,6 +577,10 @@ function stopIpcam(preserveStatus = false) {
     setIpcamStatus("IP Webcam disconnected.");
   }
   if (hudStatus) hudStatus.textContent = "Camera Off";
+  if (hudHands) {
+    hudHands.textContent = "Pose: – | L: – | R: –";
+    hudHands.className = "hud-tag";
+  }
   if (hudFps) hudFps.textContent = "0 FPS";
   normalizer.reset();
   if (wsClient) wsClient.sendReset();
@@ -427,7 +589,7 @@ function stopIpcam(preserveStatus = false) {
 function toggleMirror() {
   isMirrored = !isMirrored;
   if (videoEl) videoEl.classList.toggle("unmirrored", !isMirrored);
-  if (ipcamImgEl) ipcamImgEl.classList.toggle("unmirrored", !isMirrored);
+  if (ipcamCanvasEl) ipcamCanvasEl.classList.toggle("unmirrored", !isMirrored);
   if (canvasEl) canvasEl.classList.toggle("unmirrored", !isMirrored);
 }
 

@@ -37,12 +37,13 @@
     <section class="video-card">
       <div class="video-container">
         <video id="webcam-video" autoplay playsinline muted></video>
-        <img id="ipcam-feed" class="hidden" alt="IP Webcam Stream" crossorigin="anonymous">
+        <canvas id="ipcam-canvas" class="hidden"></canvas>
         <canvas id="overlay-canvas"></canvas>
 
         <!-- In-video HUD tags -->
         <div class="hud-overlay">
           <div id="hud-status" class="hud-tag">Initializing...</div>
+          <div id="hud-hands" class="hud-tag">Pose: – | L: – | R: –</div>
           <div id="hud-fps" class="hud-tag">0 FPS</div>
         </div>
       </div>

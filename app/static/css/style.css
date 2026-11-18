@@ -160,7 +160,7 @@ main {
 }
 
 #webcam-video,
-#ipcam-feed {
+#ipcam-canvas {
   position: absolute;
   width: 100%;
   height: 100%;
@@ -169,7 +169,7 @@ main {
 }
 
 #webcam-video.unmirrored,
-#ipcam-feed.unmirrored {
+#ipcam-canvas.unmirrored {
   transform: scaleX(1);
 }
 
@@ -215,6 +215,11 @@ main {
 
 .hud-signing {
   background: rgba(59, 130, 246, 0.85);
+  color: #fff;
+}
+
+.hud-detected {
+  background: rgba(16, 185, 129, 0.85);
   color: #fff;
 }
 

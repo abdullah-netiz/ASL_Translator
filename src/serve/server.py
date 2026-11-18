@@ -18,6 +18,7 @@ import os
 import re
 import struct
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -60,6 +61,7 @@ app.add_middleware(
 # Global pipeline and config holder
 DEFAULT_IPCAM_URL = "http://172.15.45.93:8080/video"
 pipeline: ASLInferencePipeline | None = None
+_pipeline_lock = threading.Lock()
 server_config: dict[str, Any] = {}
 
 
@@ -101,17 +103,25 @@ def normalize_ipcam_url(raw_url: str) -> str:
 def get_pipeline() -> ASLInferencePipeline:
     global pipeline
     if pipeline is None:
-        model_type = server_config.get("model_type", "t5")
-        checkpoint = server_config.get("checkpoint", None)
-        cfg_path = server_config.get("config", None)
-        beam_size = server_config.get("beam_size", 5)
-        pipeline = ASLInferencePipeline(
-            model_type=model_type,
-            config_path=cfg_path,
-            checkpoint_path=checkpoint,
-            beam_size=beam_size,
-        )
+        with _pipeline_lock:
+            if pipeline is None:
+                model_type = server_config.get("model_type", "t5")
+                checkpoint = server_config.get("checkpoint", None)
+                cfg_path = server_config.get("config", None)
+                beam_size = server_config.get("beam_size", 5)
+                pipeline = ASLInferencePipeline(
+                    model_type=model_type,
+                    config_path=cfg_path,
+                    checkpoint_path=checkpoint,
+                    beam_size=beam_size,
+                )
     return pipeline
+
+
+async def get_pipeline_async() -> ASLInferencePipeline:
+    if pipeline is not None:
+        return pipeline
+    return await asyncio.to_thread(get_pipeline)
 
 
 # ---------------------------------------------------------------------------
@@ -121,7 +131,7 @@ def get_pipeline() -> ASLInferencePipeline:
 @app.get("/health")
 async def health_check() -> dict[str, Any]:
     """Health check endpoint."""
-    p = get_pipeline()
+    p = await get_pipeline_async()
     return {
         "status": "healthy",
         "model_type": p.model_type,
@@ -133,7 +143,7 @@ async def health_check() -> dict[str, Any]:
 @app.get("/api/status")
 async def get_status() -> dict[str, Any]:
     """Returns server and model status."""
-    p = get_pipeline()
+    p = await get_pipeline_async()
     return {
         "status": "ready",
         "model_type": p.model_type,
@@ -198,13 +208,13 @@ async def get_sample_clip(split: str, clip_name: str) -> Any:
 @app.post("/api/translate")
 async def translate_direct(payload: dict[str, Any]) -> dict[str, Any]:
     """Direct REST translation endpoint for batch or test evaluation."""
-    p = get_pipeline()
+    p = await get_pipeline_async()
     if "landmarks" not in payload:
         raise HTTPException(status_code=400, detail="Missing 'landmarks' in request body")
 
     lm_arr = np.array(payload["landmarks"], dtype=np.float32)
     beam_size = payload.get("beam_size", p.beam_size)
-    result = p.translate(lm_arr, beam_size=beam_size)
+    result = await asyncio.to_thread(p.translate, lm_arr, beam_size)
     return result
 
 
@@ -254,7 +264,7 @@ async def proxy_ipcam_stream(
     without CORS or tainted-canvas restrictions.
     """
     resolved_url = normalize_ipcam_url(url)
-    timeout = httpx.Timeout(connect=5.0, read=10.0, write=5.0, pool=5.0)
+    timeout = httpx.Timeout(connect=4.0, read=5.0, write=4.0, pool=4.0)
 
     client = httpx.AsyncClient(timeout=timeout, follow_redirects=True)
     try:
@@ -382,7 +392,7 @@ async def websocket_translate(websocket: WebSocket) -> None:
     Server processes continuous stream, segments sentences, and pushes translations.
     """
     await websocket.accept()
-    p = get_pipeline()
+    p = await get_pipeline_async()
     segmenter = ContinuousSignSegmenter(
         min_frames=server_config.get("min_frames", 12),
         max_frames=server_config.get("max_frames", 240),
