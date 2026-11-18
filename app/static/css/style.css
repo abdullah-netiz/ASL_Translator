@@ -159,7 +159,8 @@ main {
   box-shadow: var(--shadow-lg);
 }
 
-#webcam-video {
+#webcam-video,
+#ipcam-feed {
   position: absolute;
   width: 100%;
   height: 100%;
@@ -167,8 +168,13 @@ main {
   transform: scaleX(-1); /* Default mirrored */
 }
 
-#webcam-video.unmirrored {
+#webcam-video.unmirrored,
+#ipcam-feed.unmirrored {
   transform: scaleX(1);
+}
+
+.hidden {
+  display: none !important;
 }
 
 #overlay-canvas {
@@ -265,6 +271,64 @@ main {
 .btn-danger:hover {
   background-color: var(--accent-red);
   color: white;
+}
+
+.btn-cyan {
+  background: linear-gradient(135deg, var(--accent-cyan), #0891b2);
+  border-color: transparent;
+  color: #fff;
+}
+
+.btn-cyan:hover {
+  background: linear-gradient(135deg, #0891b2, #0e7490);
+}
+
+/* IP Webcam Controls */
+.ipcam-panel {
+  background-color: var(--bg-primary);
+  border: 1px solid rgba(6, 182, 212, 0.35);
+  border-radius: var(--radius-md);
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.ipcam-row {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.text-input {
+  flex: 1;
+  min-width: 220px;
+  background-color: var(--bg-secondary);
+  color: var(--text-primary);
+  border: 1px solid var(--border-color);
+  padding: 8px 12px;
+  border-radius: 8px;
+  font-size: 13px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  outline: none;
+}
+
+.text-input:focus {
+  border-color: var(--accent-cyan);
+}
+
+.ipcam-status {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.ipcam-status.connected {
+  color: var(--accent-green);
+}
+
+.ipcam-status.error {
+  color: #fca5a5;
 }
 
 /* Simulation Controls */

@@ -37,6 +37,7 @@
     <section class="video-card">
       <div class="video-container">
         <video id="webcam-video" autoplay playsinline muted></video>
+        <img id="ipcam-feed" class="hidden" alt="IP Webcam Stream" crossorigin="anonymous">
         <canvas id="overlay-canvas"></canvas>
 
         <!-- In-video HUD tags -->
@@ -49,12 +50,31 @@
       <!-- Controls Toolbar -->
       <div class="controls-bar">
         <div class="btn-group">
-          <button id="btn-toggle-camera" class="btn btn-primary">Start Camera</button>
+          <button id="btn-toggle-camera" class="btn btn-primary">Start Local Camera</button>
           <button id="btn-mirror" class="btn">Toggle Mirror</button>
           <button id="btn-force-cut" class="btn">Force Translate</button>
         </div>
         <div class="btn-group">
           <button id="btn-clear-transcript" class="btn">Clear Transcript</button>
+        </div>
+      </div>
+
+      <!-- IP Webcam Panel (for PCs without a built-in camera) -->
+      <div class="ipcam-panel">
+        <div class="ipcam-row">
+          <span class="sim-label">IP Webcam URL:</span>
+          <input
+            id="input-ipcam-url"
+            type="text"
+            class="text-input"
+            value="http://172.15.45.93:8080/video"
+            placeholder="http://172.15.45.93:8080/video"
+            aria-label="IP Webcam URL"
+          >
+          <button id="btn-toggle-ipcam" class="btn btn-cyan">Connect IP Webcam</button>
+        </div>
+        <div id="ipcam-status" class="ipcam-status">
+          Default phone IP Webcam configured: 172.15.45.93:8080 (proxied via server for MediaPipe)
         </div>
       </div>
 

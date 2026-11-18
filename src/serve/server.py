@@ -14,22 +14,25 @@ import asyncio
 import json
 import logging
 import os
+import re
 import struct
 import sys
 import time
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse, urlunparse
 
 # Ensure repo root is on sys.path
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
+import httpx
 import numpy as np
 import uvicorn
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from src.serve.inference import ASLInferencePipeline
@@ -54,8 +57,44 @@ app.add_middleware(
 )
 
 # Global pipeline and config holder
+DEFAULT_IPCAM_URL = "http://172.15.45.93:8080/video"
 pipeline: ASLInferencePipeline | None = None
 server_config: dict[str, Any] = {}
+
+
+def normalize_ipcam_url(raw_url: str) -> str:
+    """
+    Normalizes user-supplied IP Webcam addresses into a valid HTTP(S) stream URL.
+    Examples:
+      - '172.15.45.93.8080'          -> 'http://172.15.45.93:8080/video'
+      - '172.15.45.93:8080'          -> 'http://172.15.45.93:8080/video'
+      - 'http://172.15.45.93:8080'   -> 'http://172.15.45.93:8080/video'
+      - 'http://172.15.45.93:8080/shot.jpg' -> 'http://172.15.45.93:8080/shot.jpg'
+    """
+    url = (raw_url or "").strip()
+    if not url:
+        raise HTTPException(status_code=400, detail="IP Webcam URL cannot be empty")
+
+    # Fix common IPv4 + dot + port typo: e.g. 172.15.45.93.8080 -> 172.15.45.93:8080
+    url = re.sub(
+        r"^(https?://)?(\d{1,3}(?:\.\d{1,3}){3})\.(\d{2,5})(/.*)?$",
+        r"\1\2:\3\4",
+        url,
+        flags=re.IGNORECASE,
+    )
+
+    if "://" not in url:
+        url = f"http://{url}"
+
+    parsed = urlparse(url)
+    if parsed.scheme.lower() not in ("http", "https"):
+        raise HTTPException(status_code=400, detail="Only http:// and https:// URLs are supported")
+    if not parsed.hostname:
+        raise HTTPException(status_code=400, detail="Invalid IP Webcam hostname or address")
+
+    path = parsed.path if parsed.path and parsed.path != "/" else "/video"
+    normalized = urlunparse((parsed.scheme.lower(), parsed.netloc, path, "", parsed.query, ""))
+    return normalized
 
 
 def get_pipeline() -> ASLInferencePipeline:
@@ -100,6 +139,7 @@ async def get_status() -> dict[str, Any]:
         "device": str(p.device),
         "beam_size": p.beam_size,
         "checkpoint": str(p.checkpoint_path),
+        "default_ipcam_url": server_config.get("ipcam_url", DEFAULT_IPCAM_URL),
     }
 
 
@@ -149,6 +189,168 @@ async def translate_direct(payload: dict[str, Any]) -> dict[str, Any]:
     beam_size = payload.get("beam_size", p.beam_size)
     result = p.translate(lm_arr, beam_size=beam_size)
     return result
+
+
+# ---------------------------------------------------------------------------
+# IP Webcam Proxy Endpoints (eliminates browser CORS / tainted canvas issues)
+# ---------------------------------------------------------------------------
+
+@app.get("/api/ipcam/test")
+async def test_ipcam_connection(
+    url: str = Query(default=DEFAULT_IPCAM_URL, description="IP Webcam URL or host:port"),
+) -> dict[str, Any]:
+    """Tests connectivity to an IP Webcam stream and returns the normalized URL."""
+    resolved_url = normalize_ipcam_url(url)
+    timeout = httpx.Timeout(connect=3.0, read=4.0, write=3.0, pool=3.0)
+    try:
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+            async with client.stream("GET", resolved_url) as resp:
+                if resp.status_code != 200:
+                    return {
+                        "ok": False,
+                        "resolved_url": resolved_url,
+                        "error": f"IP Webcam returned HTTP {resp.status_code}",
+                    }
+                content_type = resp.headers.get("content-type", "application/octet-stream")
+                return {
+                    "ok": True,
+                    "resolved_url": resolved_url,
+                    "content_type": content_type,
+                }
+    except Exception as exc:
+        logger.warning("IP Webcam connectivity test failed for %s: %s", resolved_url, exc)
+        return {
+            "ok": False,
+            "resolved_url": resolved_url,
+            "error": str(exc),
+        }
+
+
+@app.get("/api/ipcam/stream")
+async def proxy_ipcam_stream(
+    request: Request,
+    url: str = Query(default=DEFAULT_IPCAM_URL, description="IP Webcam MJPEG or JPEG URL"),
+) -> StreamingResponse:
+    """
+    Proxies an IP Webcam MJPEG stream (e.g. http://172.15.45.93:8080/video)
+    over same-origin HTTP so the browser can render it and run MediaPipe JS
+    without CORS or tainted-canvas restrictions.
+    """
+    resolved_url = normalize_ipcam_url(url)
+    timeout = httpx.Timeout(connect=5.0, read=10.0, write=5.0, pool=5.0)
+
+    client = httpx.AsyncClient(timeout=timeout, follow_redirects=True)
+    try:
+        req = client.build_request("GET", resolved_url)
+        upstream = await client.send(req, stream=True)
+    except Exception as exc:
+        await client.aclose()
+        raise HTTPException(status_code=502, detail=f"Failed to connect to IP Webcam ({resolved_url}): {exc}")
+
+    if upstream.status_code != 200:
+        status_code = upstream.status_code
+        await upstream.aclose()
+        await client.aclose()
+        raise HTTPException(
+            status_code=502,
+            detail=f"IP Webcam ({resolved_url}) returned HTTP {status_code}",
+        )
+
+    content_type = upstream.headers.get("content-type", "multipart/x-mixed-replace; boundary=frame")
+
+    # Case 1: Single JPEG snapshot endpoint (e.g. /shot.jpg) -> convert to MJPEG stream
+    if content_type.lower().startswith("image/jpeg"):
+        first_frame = await upstream.aread()
+        await upstream.aclose()
+
+        async def snapshot_mjpeg_generator():
+            try:
+                if first_frame:
+                    yield (
+                        b"--frame\r\n"
+                        b"Content-Type: image/jpeg\r\n\r\n"
+                        + first_frame
+                        + b"\r\n"
+                    )
+                while not await request.is_disconnected():
+                    await asyncio.sleep(1.0 / 15.0)
+                    resp = await client.get(resolved_url)
+                    if resp.status_code == 200 and resp.content:
+                        yield (
+                            b"--frame\r\n"
+                            b"Content-Type: image/jpeg\r\n\r\n"
+                            + resp.content
+                            + b"\r\n"
+                        )
+            except (asyncio.CancelledError, httpx.HTTPError):
+                pass
+            finally:
+                await client.aclose()
+
+        return StreamingResponse(
+            snapshot_mjpeg_generator(),
+            media_type="multipart/x-mixed-replace; boundary=frame",
+            headers={
+                "Cache-Control": "no-cache, no-store, must-revalidate",
+                "Pragma": "no-cache",
+                "Access-Control-Allow-Origin": "*",
+            },
+        )
+
+    # Case 2: Native MJPEG stream (e.g. /video, /videofeed) -> zero-overhead byte passthrough
+    async def mjpeg_passthrough_generator():
+        try:
+            async for chunk in upstream.aiter_bytes(chunk_size=16384):
+                if await request.is_disconnected():
+                    break
+                if chunk:
+                    yield chunk
+        except (asyncio.CancelledError, httpx.HTTPError):
+            pass
+        finally:
+            await upstream.aclose()
+            await client.aclose()
+
+    return StreamingResponse(
+        mjpeg_passthrough_generator(),
+        media_type=content_type,
+        headers={
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Pragma": "no-cache",
+            "Access-Control-Allow-Origin": "*",
+        },
+    )
+
+
+@app.get("/api/ipcam/snapshot")
+async def proxy_ipcam_snapshot(
+    url: str = Query(default=DEFAULT_IPCAM_URL, description="IP Webcam snapshot URL"),
+) -> Response:
+    """Fetches a single JPEG snapshot from the IP Webcam."""
+    resolved_url = normalize_ipcam_url(url)
+    # If caller passed /video, try /shot.jpg for single snapshot
+    parsed = urlparse(resolved_url)
+    if parsed.path in ("/video", "/videofeed"):
+        resolved_url = urlunparse((parsed.scheme, parsed.netloc, "/shot.jpg", "", parsed.query, ""))
+
+    timeout = httpx.Timeout(connect=3.0, read=5.0, write=3.0, pool=3.0)
+    try:
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+            resp = await client.get(resolved_url)
+            if resp.status_code != 200:
+                raise HTTPException(status_code=502, detail=f"IP Webcam returned HTTP {resp.status_code}")
+            return Response(
+                content=resp.content,
+                media_type=resp.headers.get("content-type", "image/jpeg"),
+                headers={
+                    "Cache-Control": "no-cache",
+                    "Access-Control-Allow-Origin": "*",
+                },
+            )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Failed to fetch IP Webcam snapshot: {exc}")
 
 
 # ---------------------------------------------------------------------------
@@ -322,6 +524,7 @@ def main() -> None:
     parser.add_argument("--beam-size", type=int, default=5, help="Beam width for translation")
     parser.add_argument("--min-frames", type=int, default=15, help="Min frames for sentence boundary")
     parser.add_argument("--pause-frames", type=int, default=12, help="Pause frames to cut sentence")
+    parser.add_argument("--ipcam-url", default=DEFAULT_IPCAM_URL, help="Default IP Webcam stream URL")
     args = parser.parse_args()
 
     server_config["model_type"] = args.model_type
@@ -330,6 +533,7 @@ def main() -> None:
     server_config["beam_size"] = args.beam_size
     server_config["min_frames"] = args.min_frames
     server_config["pause_frames"] = args.pause_frames
+    server_config["ipcam_url"] = args.ipcam_url
 
     # Pre-load pipeline to verify checkpoint and warm up GPU before listening
     logger.info("Pre-warming ASLInferencePipeline...")

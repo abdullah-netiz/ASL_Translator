@@ -7,10 +7,14 @@ import { ASLWebSocketClient } from "./socket.js";
 
 // DOM Elements
 const videoEl = document.getElementById("webcam-video");
+const ipcamImgEl = document.getElementById("ipcam-feed");
 const canvasEl = document.getElementById("overlay-canvas");
 const canvasCtx = canvasEl ? canvasEl.getContext("2d") : null;
 
 const btnToggleCamera = document.getElementById("btn-toggle-camera");
+const btnToggleIpcam = document.getElementById("btn-toggle-ipcam");
+const inputIpcamUrl = document.getElementById("input-ipcam-url");
+const ipcamStatusEl = document.getElementById("ipcam-status");
 const btnMirror = document.getElementById("btn-mirror");
 const btnForceCut = document.getElementById("btn-force-cut");
 const btnClearTranscript = document.getElementById("btn-clear-transcript");
@@ -30,11 +34,17 @@ const valDevice = document.getElementById("val-device");
 const valLatency = document.getElementById("val-latency");
 const valSentences = document.getElementById("val-sentences");
 
+// Offscreen canvas for clean snapshot capture of MJPEG IP Webcam frames
+const offscreenCanvas = document.createElement("canvas");
+const offscreenCtx = offscreenCanvas.getContext("2d");
+
 // State
 let normalizer = new LandmarkNormalizer();
 let wsClient = null;
 let camera = null;
 let isCameraRunning = false;
+let isIpcamRunning = false;
+let isProcessingFrame = false;
 let isMirrored = true;
 let sentenceCount = 0;
 let simulationInterval = null;
@@ -170,8 +180,14 @@ function drawLandmarks(results) {
 }
 
 // ---------------------------------------------------------------------------
-// Camera Control
+// Camera & IP Webcam Control
 // ---------------------------------------------------------------------------
+
+function setIpcamStatus(message, state = "") {
+  if (!ipcamStatusEl) return;
+  ipcamStatusEl.textContent = message;
+  ipcamStatusEl.className = "ipcam-status" + (state ? ` ${state}` : "");
+}
 
 async function toggleCamera() {
   if (isCameraRunning) {
@@ -184,11 +200,19 @@ async function toggleCamera() {
 async function startCamera() {
   if (!videoEl || !holistic) return;
 
+  // Disconnect IP Webcam if active
+  if (isIpcamRunning) {
+    stopIpcam();
+  }
+
   try {
     const stream = await navigator.mediaDevices.getUserMedia({
       video: { width: 640, height: 360, frameRate: { ideal: 30 } },
       audio: false,
     });
+
+    videoEl.classList.remove("hidden");
+    if (ipcamImgEl) ipcamImgEl.classList.add("hidden");
 
     videoEl.srcObject = stream;
     await videoEl.play();
@@ -200,7 +224,7 @@ async function startCamera() {
 
     isCameraRunning = true;
     if (btnToggleCamera) {
-      btnToggleCamera.textContent = "Stop Camera";
+      btnToggleCamera.textContent = "Stop Local Camera";
       btnToggleCamera.classList.add("btn-danger");
     }
 
@@ -209,17 +233,25 @@ async function startCamera() {
     // Loop frames through Holistic
     async function frameLoop() {
       if (!isCameraRunning) return;
-      if (videoEl.readyState >= 2) {
-        await holistic.send({ image: videoEl });
+      if (videoEl.readyState >= 2 && !isProcessingFrame) {
+        isProcessingFrame = true;
+        try {
+          await holistic.send({ image: videoEl });
+        } finally {
+          isProcessingFrame = false;
+        }
       }
       requestAnimationFrame(frameLoop);
     }
     requestAnimationFrame(frameLoop);
 
-    console.log("Webcam started.");
+    console.log("Local webcam started.");
   } catch (err) {
     console.error("Camera access failed:", err);
-    alert(`Could not start camera: ${err.message}. You can still use the Simulation Mode below!`);
+    alert(
+      `Could not start local camera: ${err.message}. ` +
+      `Use the IP Webcam option (172.15.45.93:8080) or Simulation Mode below!`
+    );
   }
 }
 
@@ -233,16 +265,169 @@ function stopCamera() {
     canvasCtx.clearRect(0, 0, canvasEl.width, canvasEl.height);
   }
   if (btnToggleCamera) {
-    btnToggleCamera.textContent = "Start Camera";
+    btnToggleCamera.textContent = "Start Local Camera";
     btnToggleCamera.classList.remove("btn-danger");
   }
   if (hudStatus) hudStatus.textContent = "Camera Off";
   normalizer.reset();
 }
 
+async function toggleIpcam() {
+  if (isIpcamRunning) {
+    stopIpcam();
+  } else {
+    await startIpcam();
+  }
+}
+
+async function startIpcam() {
+  if (!ipcamImgEl || !holistic) {
+    setIpcamStatus("MediaPipe Holistic is still loading — please wait a second and retry.", "error");
+    return;
+  }
+
+  const rawUrl = (inputIpcamUrl ? inputIpcamUrl.value : "http://172.15.45.93:8080/video").trim();
+  if (!rawUrl) {
+    setIpcamStatus("Please enter an IP Webcam address (e.g. 172.15.45.93:8080).", "error");
+    return;
+  }
+
+  // Stop local camera if running
+  if (isCameraRunning) {
+    stopCamera();
+  }
+
+  if (btnToggleIpcam) {
+    btnToggleIpcam.disabled = true;
+    btnToggleIpcam.textContent = "Connecting...";
+  }
+  setIpcamStatus(`Testing connection to ${rawUrl}...`);
+
+  try {
+    const testRes = await fetch(`/api/ipcam/test?url=${encodeURIComponent(rawUrl)}`);
+    const testData = await testRes.json();
+
+    if (!testRes.ok || !testData.ok) {
+      const errMsg = testData.error || testData.detail || "Unable to reach IP Webcam";
+      setIpcamStatus(`Connection failed: ${errMsg}`, "error");
+      if (btnToggleIpcam) {
+        btnToggleIpcam.disabled = false;
+        btnToggleIpcam.textContent = "Connect IP Webcam";
+      }
+      return;
+    }
+
+    const resolvedUrl = testData.resolved_url || rawUrl;
+    if (inputIpcamUrl) {
+      inputIpcamUrl.value = resolvedUrl;
+    }
+
+    // Show IP Webcam feed proxied via same-origin FastAPI server
+    if (videoEl) videoEl.classList.add("hidden");
+    ipcamImgEl.classList.remove("hidden");
+
+    const proxyUrl = `/api/ipcam/stream?url=${encodeURIComponent(resolvedUrl)}&t=${Date.now()}`;
+    ipcamImgEl.onerror = () => {
+      if (isIpcamRunning) {
+        setIpcamStatus(`IP Webcam stream interrupted (${resolvedUrl}). Check phone app & Wi-Fi.`, "error");
+        stopIpcam(true);
+      }
+    };
+    ipcamImgEl.src = proxyUrl;
+
+    isIpcamRunning = true;
+    normalizer.reset();
+    if (wsClient) wsClient.sendReset();
+
+    if (btnToggleIpcam) {
+      btnToggleIpcam.disabled = false;
+      btnToggleIpcam.textContent = "Disconnect IP Webcam";
+      btnToggleIpcam.classList.remove("btn-cyan");
+      btnToggleIpcam.classList.add("btn-danger");
+    }
+    setIpcamStatus(`Connected to ${resolvedUrl}`, "connected");
+    if (hudStatus) hudStatus.textContent = "IP Webcam Active";
+
+    // Frame extraction loop: draw current MJPEG frame to offscreen canvas and send to MediaPipe
+    async function ipcamFrameLoop() {
+      if (!isIpcamRunning) return;
+
+      if (
+        ipcamImgEl.complete &&
+        ipcamImgEl.naturalWidth > 0 &&
+        ipcamImgEl.naturalHeight > 0 &&
+        !isProcessingFrame
+      ) {
+        const w = ipcamImgEl.naturalWidth;
+        const h = ipcamImgEl.naturalHeight;
+
+        if (offscreenCanvas.width !== w || offscreenCanvas.height !== h) {
+          offscreenCanvas.width = w;
+          offscreenCanvas.height = h;
+        }
+        if (canvasEl && (canvasEl.width !== w || canvasEl.height !== h)) {
+          canvasEl.width = w;
+          canvasEl.height = h;
+        }
+
+        isProcessingFrame = true;
+        try {
+          offscreenCtx.drawImage(ipcamImgEl, 0, 0, w, h);
+          await holistic.send({ image: offscreenCanvas });
+        } catch (err) {
+          console.error("IP Webcam frame processing error:", err);
+        } finally {
+          isProcessingFrame = false;
+        }
+      }
+
+      requestAnimationFrame(ipcamFrameLoop);
+    }
+    requestAnimationFrame(ipcamFrameLoop);
+
+    console.log("IP Webcam connected:", resolvedUrl);
+  } catch (err) {
+    console.error("IP Webcam connection error:", err);
+    setIpcamStatus(`Connection error: ${err.message}`, "error");
+    if (btnToggleIpcam) {
+      btnToggleIpcam.disabled = false;
+      btnToggleIpcam.textContent = "Connect IP Webcam";
+    }
+  }
+}
+
+function stopIpcam(preserveStatus = false) {
+  isIpcamRunning = false;
+  if (ipcamImgEl) {
+    ipcamImgEl.onerror = null;
+    ipcamImgEl.src = "";
+    ipcamImgEl.classList.add("hidden");
+  }
+  if (videoEl) {
+    videoEl.classList.remove("hidden");
+  }
+  if (canvasCtx && canvasEl) {
+    canvasCtx.clearRect(0, 0, canvasEl.width, canvasEl.height);
+  }
+  if (btnToggleIpcam) {
+    btnToggleIpcam.disabled = false;
+    btnToggleIpcam.textContent = "Connect IP Webcam";
+    btnToggleIpcam.classList.remove("btn-danger");
+    btnToggleIpcam.classList.add("btn-cyan");
+  }
+  if (!preserveStatus) {
+    setIpcamStatus("IP Webcam disconnected.");
+  }
+  if (hudStatus) hudStatus.textContent = "Camera Off";
+  if (hudFps) hudFps.textContent = "0 FPS";
+  normalizer.reset();
+  if (wsClient) wsClient.sendReset();
+}
+
 function toggleMirror() {
   isMirrored = !isMirrored;
   if (videoEl) videoEl.classList.toggle("unmirrored", !isMirrored);
+  if (ipcamImgEl) ipcamImgEl.classList.toggle("unmirrored", !isMirrored);
   if (canvasEl) canvasEl.classList.toggle("unmirrored", !isMirrored);
 }
 
@@ -439,6 +624,9 @@ async function pollServerStatus() {
       const data = await res.json();
       if (valModelType) valModelType.textContent = (data.model_type || "T5").toUpperCase();
       if (valDevice) valDevice.textContent = data.device || "CPU";
+      if (inputIpcamUrl && data.default_ipcam_url && !inputIpcamUrl.dataset.userEdited) {
+        inputIpcamUrl.value = data.default_ipcam_url;
+      }
     }
   } catch (e) {
     // Ignore network glitch during initial load
@@ -456,6 +644,18 @@ document.addEventListener("DOMContentLoaded", () => {
   loadSampleClipsList();
 
   if (btnToggleCamera) btnToggleCamera.addEventListener("click", toggleCamera);
+  if (btnToggleIpcam) btnToggleIpcam.addEventListener("click", toggleIpcam);
+  if (inputIpcamUrl) {
+    inputIpcamUrl.addEventListener("input", () => {
+      inputIpcamUrl.dataset.userEdited = "true";
+    });
+    inputIpcamUrl.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        toggleIpcam();
+      }
+    });
+  }
   if (btnMirror) btnMirror.addEventListener("click", toggleMirror);
   if (btnSimulate) btnSimulate.addEventListener("click", runClipSimulation);
 

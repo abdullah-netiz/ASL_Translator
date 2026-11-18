@@ -45,8 +45,9 @@ A browser-based real-time continuous American Sign Language (ASL) to English tra
    - Transformer Landmark Encoder + learned projection + T5 text decoder runs in ~1.0s on GPU with beam width 5 (and ~120ms with greedy search).
    - Real-time compliance verified against the $< 2.0$s target.
 
-4. **Webcam and Simulation Modes**:
-   - **Live Webcam**: Real-time sign language capture directly from your webcam with landmark visualization canvas.
+4. **Webcam, IP Webcam, and Simulation Modes**:
+   - **Live Local Webcam**: Real-time sign language capture directly from a built-in/USB webcam with landmark visualization canvas.
+   - **IP Webcam (Android / Network Camera)**: Connect a phone running the IP Webcam app (pre-configured for `http://172.15.45.93:8080/video`). The FastAPI server proxies the MJPEG stream on the same origin (`/api/ipcam/stream`) so MediaPipe Holistic JS runs cleanly without CORS/tainted-canvas errors.
    - **Clip Simulator**: Select and stream pre-extracted How2Sign validation/test clips frame-by-frame at 15 fps to evaluate translation without requiring a live camera.
 
 ---
@@ -72,6 +73,7 @@ Options:
 - `--checkpoint`: Path to model weights (default `checkpoints/t5/best_model.pt`)
 - `--beam-size`: Beam search width (default `5`)
 - `--pause-frames`: Number of rest frames to trigger sentence boundary (default `12`)
+- `--ipcam-url`: Default IP Webcam stream URL pre-filled in the dashboard (default `http://172.15.45.93:8080/video`)
 
 ### 2. Open in Browser
 

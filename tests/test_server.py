@@ -7,11 +7,12 @@ from pathlib import Path
 import numpy as np
 import pytest
 import torch
+from fastapi import HTTPException
 from starlette.testclient import TestClient
 
 from src.serve.inference import ASLInferencePipeline
 from src.serve.segmenter import ContinuousSignSegmenter
-from src.serve.server import app, server_config
+from src.serve.server import DEFAULT_IPCAM_URL, app, normalize_ipcam_url, server_config
 
 
 @pytest.fixture
@@ -138,3 +139,34 @@ def test_websocket_stream_flow():
         websocket.send_json({"type": "reset"})
         reset_ack = websocket.receive_json()
         assert reset_ack["type"] == "reset_ack"
+
+
+def test_normalize_ipcam_url():
+    """Verifies IP Webcam URL normalization including dot-port typo recovery."""
+    assert normalize_ipcam_url("172.15.45.93.8080") == "http://172.15.45.93:8080/video"
+    assert normalize_ipcam_url("172.15.45.93:8080") == "http://172.15.45.93:8080/video"
+    assert normalize_ipcam_url("http://172.15.45.93:8080") == "http://172.15.45.93:8080/video"
+    assert normalize_ipcam_url("http://172.15.45.93:8080/") == "http://172.15.45.93:8080/video"
+    assert normalize_ipcam_url("http://172.15.45.93:8080/shot.jpg") == "http://172.15.45.93:8080/shot.jpg"
+
+    with pytest.raises(HTTPException) as exc_info:
+        normalize_ipcam_url("file:///etc/passwd")
+    assert exc_info.value.status_code == 400
+
+
+def test_ipcam_endpoints_and_status():
+    """Verifies default IP Webcam config in /api/status and input validation."""
+    server_config["model_type"] = "t5"
+    server_config["config"] = "configs/t5_decoder.yaml"
+    server_config["checkpoint"] = "checkpoints/t5/best_model.pt"
+
+    client = TestClient(app)
+
+    res_status = client.get("/api/status")
+    assert res_status.status_code == 200
+    assert res_status.json()["default_ipcam_url"] == DEFAULT_IPCAM_URL
+
+    # Reject non-http schemes
+    res_bad = client.get("/api/ipcam/test", params={"url": "ftp://172.15.45.93:8080/video"})
+    assert res_bad.status_code == 400
+
