@@ -168,7 +168,12 @@ def main() -> None:
     fit_res = trainer.fit(eval_every=5)
     logger.info(f"Training complete. Best val loss: {fit_res['best_val_loss']:.4f}")
 
-    # 5. Final evaluation with beam search (width 5)
+    # 5. Final evaluation with beam search (width 5) on best checkpoint
+    best_ckpt_path = ckpt_dir / "best_model.pt"
+    if best_ckpt_path.exists():
+        logger.info(f"Reloading best checkpoint from {best_ckpt_path} for final evaluation...")
+        best_state = torch.load(best_ckpt_path, map_location=trainer.device)
+        trainer.model.load_state_dict(best_state["model_state_dict"])
     logger.info("Running final beam search (width 5) evaluation on validation set...")
     val_eval = trainer.evaluate(val_loader, beam_size=5, max_samples=50)
     metrics = val_eval["metrics"]
