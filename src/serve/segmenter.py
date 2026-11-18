@@ -33,19 +33,21 @@ class ContinuousSignSegmenter:
 
     # Feature offsets in the 1200-dim feature vector
     LEFT_WRIST_Y_IDX = 61      # Pose point 15 y coordinate
+    LEFT_WRIST_VIS_IDX = 63    # Pose point 15 visibility
     RIGHT_WRIST_Y_IDX = 65     # Pose point 16 y coordinate
+    RIGHT_WRIST_VIS_IDX = 67   # Pose point 16 visibility
     LEFT_HAND_MASK_IDX = 598   # Hand presence flag
     RIGHT_HAND_MASK_IDX = 599  # Hand presence flag
     VELOCITY_START_IDX = 600   # Velocity block start
 
     def __init__(
         self,
-        min_frames: int = 15,          # Min frames for a sentence (~1.0s at 15 fps)
-        max_frames: int = 240,         # Max frames before forcing a split (~16.0s at 15 fps)
-        pause_frames: int = 12,        # Consecutive inactive/pause frames to trigger cut (~0.8s)
-        motion_threshold: float = 0.5, # Velocity norm below which motion is considered paused
-        wrist_drop_threshold: float = 1.8, # Shoulder-normalized Y threshold for dropped hands
-        preroll_frames: int = 5,       # Frames to prepend before detected signing onset
+        min_frames: int = 12,           # Min frames for a sentence (~0.8s at 15 fps)
+        max_frames: int = 240,          # Max frames before forcing a split (~16.0s at 15 fps)
+        pause_frames: int = 12,         # Consecutive inactive/pause frames to trigger cut (~0.8s)
+        motion_threshold: float = 0.08, # Velocity norm below which motion is considered paused
+        wrist_drop_threshold: float = 2.2, # Shoulder-normalized Y threshold for dropped hands
+        preroll_frames: int = 5,        # Frames to prepend before detected signing onset
     ):
         self.min_frames = min_frames
         self.max_frames = max_frames
@@ -73,23 +75,27 @@ class ContinuousSignSegmenter:
         """
         Determines whether the signer is actively signing in this frame:
         - Hand presence masks (at least one hand detected)
-        - Wrist positions above the rest/drop line
+        - Wrist positions above the rest/drop line (when pose wrist is visible)
         - Motion magnitude
         """
-        lh_detected = frame[self.LEFT_HAND_MASK_IDX] > 0.5
-        rh_detected = frame[self.RIGHT_HAND_MASK_IDX] > 0.5
+        lh_detected = bool(frame[self.LEFT_HAND_MASK_IDX] > 0.5)
+        rh_detected = bool(frame[self.RIGHT_HAND_MASK_IDX] > 0.5)
 
         if not lh_detected and not rh_detected:
             return False
 
-        # Check wrist elevations (lower y means higher elevation in image space)
-        lw_y = frame[self.LEFT_WRIST_Y_IDX]
-        rw_y = frame[self.RIGHT_WRIST_Y_IDX]
+        # Check wrist elevations (lower y means higher elevation in image space).
+        # Only enforce wrist-drop when pose wrist visibility is reliable (e.g. > 0.3);
+        # on close-up phone cameras where shoulders/pose may be clipped, trust hand detection.
+        lw_y = float(frame[self.LEFT_WRIST_Y_IDX])
+        lw_vis = float(frame[self.LEFT_WRIST_VIS_IDX])
+        rw_y = float(frame[self.RIGHT_WRIST_Y_IDX])
+        rw_vis = float(frame[self.RIGHT_WRIST_VIS_IDX])
 
         hands_dropped = True
-        if lh_detected and lw_y < self.wrist_drop_threshold:
+        if lh_detected and (lw_vis < 0.3 or lw_y < self.wrist_drop_threshold):
             hands_dropped = False
-        if rh_detected and rw_y < self.wrist_drop_threshold:
+        if rh_detected and (rw_vis < 0.3 or rw_y < self.wrist_drop_threshold):
             hands_dropped = False
 
         if hands_dropped:
@@ -175,6 +181,8 @@ class ContinuousSignSegmenter:
             "buffered_frames": len(self.current_frames),
             "pause_counter": self.pause_counter,
             "vel_norm": round(vel_norm, 3),
+            "lh_detected": bool(frame[self.LEFT_HAND_MASK_IDX] > 0.5),
+            "rh_detected": bool(frame[self.RIGHT_HAND_MASK_IDX] > 0.5),
             "cut_reason": cut_reason,
             "sentences_count": self.sentences_segmented,
         }

@@ -451,18 +451,20 @@ function initWebSocket() {
     },
     onStatus: (data) => {
       if (hudStatus) {
+        const handsTag = `L:${data.lh_detected ? "✓" : "–"} R:${data.rh_detected ? "✓" : "–"} | vel:${(data.vel_norm ?? 0).toFixed(2)}`;
         if (data.is_signing) {
-          hudStatus.textContent = `Signing (${data.buffered_frames} frames)`;
+          hudStatus.textContent = `Signing (${data.buffered_frames}f) • ${handsTag}`;
           hudStatus.className = "hud-tag hud-signing";
         } else {
-          hudStatus.textContent = data.pause_counter > 0 ? "Pause / Rest" : "Idle";
+          const stateLabel = data.pause_counter > 0 ? "Pause" : "Idle";
+          hudStatus.textContent = `${stateLabel} • ${handsTag}`;
           hudStatus.className = "hud-tag";
         }
       }
     },
     onTranslating: (data) => {
       if (hudStatus) {
-        hudStatus.textContent = "Translating...";
+        hudStatus.textContent = `Translating (${data.num_frames} frames)...`;
         hudStatus.className = "hud-tag";
       }
       if (connDot) {
@@ -471,6 +473,14 @@ function initWebSocket() {
     },
     onTranslation: (data) => {
       handleTranslationResult(data);
+    },
+    onNotice: (data) => {
+      if (bannerMeta && data.message) {
+        bannerMeta.textContent = data.message;
+      }
+      if (hudStatus && data.message) {
+        hudStatus.textContent = data.message;
+      }
     },
   });
 
@@ -578,6 +588,9 @@ async function runClipSimulation() {
 
     const frames = clipData.frames;
     console.log(`Simulating ${frames.length} frames for clip ${clipName}...`);
+    if (bannerMeta && clipData.reference_text) {
+      bannerMeta.textContent = `Ground Truth: "${clipData.reference_text}"`;
+    }
 
     let idx = 0;
     if (hudStatus) hudStatus.textContent = `Simulating: 0/${frames.length}`;

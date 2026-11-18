@@ -21,6 +21,7 @@ export class ASLWebSocketClient {
     this.onStatus = options.onStatus || (() => {});
     this.onTranslating = options.onTranslating || (() => {});
     this.onTranslation = options.onTranslation || (() => {});
+    this.onNotice = options.onNotice || (() => {});
     this.onError = options.onError || (() => {});
   }
 
@@ -94,6 +95,9 @@ export class ASLWebSocketClient {
         break;
       case "translation":
         this.onTranslation(data);
+        break;
+      case "notice":
+        this.onNotice(data);
         break;
       case "connected":
       case "pong":

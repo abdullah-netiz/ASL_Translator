@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import csv
 import json
 import logging
 import os
@@ -158,6 +159,21 @@ async def list_sample_clips() -> dict[str, Any]:
     }
 
 
+def _lookup_reference_sentence(split: str, clip_stem: str) -> str:
+    """Looks up the ground-truth English reference sentence for a clip from manifests."""
+    manifest_path = _REPO_ROOT / "data" / "manifests" / f"{split}_manifest.csv"
+    if not manifest_path.exists():
+        return ""
+    try:
+        with open(manifest_path, encoding="utf-8") as f:
+            for row in csv.DictReader(f):
+                if row.get("clip_id") == clip_stem:
+                    return row.get("sentence", "")
+    except Exception:
+        pass
+    return ""
+
+
 @app.get("/api/clip/{split}/{clip_name}")
 async def get_sample_clip(split: str, clip_name: str) -> Any:
     """Returns frames of a sample clip formatted as JSON array for client simulation."""
@@ -174,6 +190,7 @@ async def get_sample_clip(split: str, clip_name: str) -> Any:
         "split": split,
         "num_frames": arr.shape[0],
         "feature_dim": arr.shape[1],
+        "reference_text": _lookup_reference_sentence(split, clip_path.stem),
         "frames": arr.tolist(),
     }
 
@@ -367,11 +384,11 @@ async def websocket_translate(websocket: WebSocket) -> None:
     await websocket.accept()
     p = get_pipeline()
     segmenter = ContinuousSignSegmenter(
-        min_frames=server_config.get("min_frames", 15),
+        min_frames=server_config.get("min_frames", 12),
         max_frames=server_config.get("max_frames", 240),
         pause_frames=server_config.get("pause_frames", 12),
-        motion_threshold=server_config.get("motion_threshold", 0.5),
-        wrist_drop_threshold=server_config.get("wrist_drop_threshold", 1.8),
+        motion_threshold=server_config.get("motion_threshold", 0.08),
+        wrist_drop_threshold=server_config.get("wrist_drop_threshold", 2.2),
     )
 
     logger.info("WebSocket client connected to /ws/translate")
@@ -413,11 +430,21 @@ async def websocket_translate(websocket: WebSocket) -> None:
                     await websocket.send_json({"type": "reset_ack", "message": "Segmenter reset"})
                     continue
                 elif msg_type == "force_cut":
-                    # Force translation of currently buffered frames
-                    if len(segmenter.current_frames) >= 5:
-                        seg_arr = np.array(segmenter.current_frames, dtype=np.float32)
+                    # Force translation of currently buffered frames (fallback to preroll if needed)
+                    frames_to_translate = (
+                        list(segmenter.current_frames)
+                        if len(segmenter.current_frames) >= 3
+                        else list(segmenter.preroll_buffer)
+                    )
+                    if len(frames_to_translate) >= 3:
+                        seg_arr = np.array(frames_to_translate, dtype=np.float32)
                         segmenter.reset()
-                        t_res = p.translate(seg_arr)
+                        await websocket.send_json({
+                            "type": "translating",
+                            "num_frames": len(seg_arr),
+                            "reason": "force_cut",
+                        })
+                        t_res = await asyncio.to_thread(p.translate, seg_arr)
                         await websocket.send_json({
                             "type": "translation",
                             "text": t_res["text"],
@@ -428,6 +455,11 @@ async def websocket_translate(websocket: WebSocket) -> None:
                             "fps_processed": t_res["fps_processed"],
                             "reason": "force_cut",
                             "timestamp": time.time(),
+                        })
+                    else:
+                        await websocket.send_json({
+                            "type": "notice",
+                            "message": "No signing frames buffered yet — raise hands in view or simulate a clip first.",
                         })
                     continue
                 elif msg_type == "frame":
@@ -452,6 +484,8 @@ async def websocket_translate(websocket: WebSocket) -> None:
                     "buffered_frames": info["buffered_frames"],
                     "pause_counter": info["pause_counter"],
                     "vel_norm": info["vel_norm"],
+                    "lh_detected": info["lh_detected"],
+                    "rh_detected": info["rh_detected"],
                 })
 
             # When a sentence boundary is detected, translate immediately!

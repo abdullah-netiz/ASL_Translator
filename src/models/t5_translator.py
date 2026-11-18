@@ -112,9 +112,11 @@ class T5ASLTranslator(nn.Module):
         landmarks: torch.Tensor,
         landmarks_mask: torch.Tensor | None = None,
         beam_size: int = 5,
-        max_length: int = 128,
-        length_penalty: float = 0.6,
-        repetition_penalty: float = 1.2,
+        max_length: int = 64,
+        min_new_tokens: int = 3,
+        length_penalty: float = 1.0,
+        repetition_penalty: float = 1.3,
+        no_repeat_ngram_size: int = 3,
     ) -> list[list[int]]:
         """
         Generate token IDs using T5's beam search (width 5 by default).
@@ -124,14 +126,19 @@ class T5ASLTranslator(nn.Module):
         encoder_outputs = BaseModelOutput(last_hidden_state=projected)
         attention_mask = landmarks_mask.long() if landmarks_mask is not None else None
 
-        generated_ids = self.t5.generate(
-            encoder_outputs=encoder_outputs,
-            attention_mask=attention_mask,
-            num_beams=beam_size,
-            max_length=max_length,
-            length_penalty=length_penalty,
-            repetition_penalty=repetition_penalty,
-            early_stopping=True,
-        )
+        gen_kwargs: dict[str, Any] = {
+            "encoder_outputs": encoder_outputs,
+            "attention_mask": attention_mask,
+            "num_beams": beam_size,
+            "max_length": max_length,
+            "min_new_tokens": min_new_tokens,
+            "repetition_penalty": repetition_penalty,
+            "no_repeat_ngram_size": no_repeat_ngram_size,
+        }
+        if beam_size > 1:
+            gen_kwargs["length_penalty"] = length_penalty
+            gen_kwargs["early_stopping"] = True
+
+        generated_ids = self.t5.generate(**gen_kwargs)
 
         return generated_ids.tolist()
