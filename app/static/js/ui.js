@@ -135,6 +135,14 @@ function onHolisticResults(results) {
 // Canvas Drawing Utilities
 // ---------------------------------------------------------------------------
 
+// Clean upper-body pose connections only (shoulders + arms — excludes coarse pose face dots & off-screen legs)
+const UPPER_BODY_POSE_CONNECTIONS = [
+  [11, 12], // Shoulders
+  [11, 13], [13, 15], // Left arm (shoulder -> elbow -> wrist)
+  [12, 14], [14, 16], // Right arm (shoulder -> elbow -> wrist)
+];
+const UPPER_BODY_POSE_INDICES = [11, 12, 13, 14, 15, 16];
+
 function drawLandmarks(results) {
   if (!canvasCtx || !canvasEl) return;
 
@@ -143,51 +151,69 @@ function drawLandmarks(results) {
 
   // If window.drawConnectors from MediaPipe Drawing Utils is available
   if (typeof window.drawConnectors !== "undefined" && typeof window.drawLandmarks !== "undefined") {
-    // Upper body pose
+    // Upper-body pose (shoulders, elbows, wrists only — clean & accurate)
     if (results.poseLandmarks) {
-      window.drawConnectors(canvasCtx, results.poseLandmarks, window.POSE_CONNECTIONS, {
-        color: "rgba(6, 182, 212, 0.6)",
+      window.drawConnectors(canvasCtx, results.poseLandmarks, UPPER_BODY_POSE_CONNECTIONS, {
+        color: "rgba(56, 189, 248, 0.75)",
         lineWidth: 3,
       });
-      window.drawLandmarks(canvasCtx, results.poseLandmarks, {
+      const upperBodyJoints = UPPER_BODY_POSE_INDICES
+        .map((i) => results.poseLandmarks[i])
+        .filter((pt) => pt && (pt.visibility === undefined || pt.visibility > 0.3));
+      window.drawLandmarks(canvasCtx, upperBodyJoints, {
         color: "#38bdf8",
+        fillColor: "#0284c7",
+        lineWidth: 1.5,
+        radius: 4,
+      });
+    }
+
+    // Left hand (emerald green)
+    if (results.leftHandLandmarks) {
+      window.drawConnectors(canvasCtx, results.leftHandLandmarks, window.HAND_CONNECTIONS, {
+        color: "#10b981",
+        lineWidth: 2.5,
+      });
+      window.drawLandmarks(canvasCtx, results.leftHandLandmarks, {
+        color: "#6ee7b7",
+        fillColor: "#059669",
         lineWidth: 1,
         radius: 3,
       });
     }
 
-    // Left hand
-    if (results.leftHandLandmarks) {
-      window.drawConnectors(canvasCtx, results.leftHandLandmarks, window.HAND_CONNECTIONS, {
-        color: "#10b981",
-        lineWidth: 2,
-      });
-      window.drawLandmarks(canvasCtx, results.leftHandLandmarks, {
-        color: "#6ee7b7",
-        lineWidth: 1,
-        radius: 2,
-      });
-    }
-
-    // Right hand
+    // Right hand (amber/gold)
     if (results.rightHandLandmarks) {
       window.drawConnectors(canvasCtx, results.rightHandLandmarks, window.HAND_CONNECTIONS, {
         color: "#f59e0b",
-        lineWidth: 2,
+        lineWidth: 2.5,
       });
       window.drawLandmarks(canvasCtx, results.rightHandLandmarks, {
         color: "#fcd34d",
+        fillColor: "#d97706",
         lineWidth: 1,
-        radius: 2,
+        radius: 3,
       });
     }
 
-    // Face mesh (subtle)
+    // Accurate face contours (lips + eyebrows for ASL non-manual expressions)
     if (results.faceLandmarks) {
-      window.drawConnectors(canvasCtx, results.faceLandmarks, window.FACEMESH_LIPS, {
-        color: "rgba(244, 63, 94, 0.4)",
-        lineWidth: 1,
-      });
+      if (window.FACEMESH_LIPS) {
+        window.drawConnectors(canvasCtx, results.faceLandmarks, window.FACEMESH_LIPS, {
+          color: "rgba(244, 63, 94, 0.55)",
+          lineWidth: 1.5,
+        });
+      }
+      if (window.FACEMESH_LEFT_EYEBROW && window.FACEMESH_RIGHT_EYEBROW) {
+        window.drawConnectors(canvasCtx, results.faceLandmarks, window.FACEMESH_LEFT_EYEBROW, {
+          color: "rgba(56, 189, 248, 0.55)",
+          lineWidth: 1.5,
+        });
+        window.drawConnectors(canvasCtx, results.faceLandmarks, window.FACEMESH_RIGHT_EYEBROW, {
+          color: "rgba(56, 189, 248, 0.55)",
+          lineWidth: 1.5,
+        });
+      }
     }
   }
 
