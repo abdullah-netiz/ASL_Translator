@@ -168,8 +168,23 @@ class ContinuousSignSegmenter:
                 # Remove trailing pause frames from the translated segment
                 valid_len = max(self.min_frames, curr_len - self.pause_counter)
                 segment_arr = np.array(self.current_frames[:valid_len], dtype=np.float32)
-                segment_data = segment_arr
-                self.sentences_segmented += 1
+
+                # Validate hand presence: At least 30% of frames MUST have hands detected!
+                # This prevents spurious translations when users shift in their chair or sit with hands down.
+                lh_mask = segment_arr[:, self.LEFT_HAND_MASK_IDX] > 0.5
+                rh_mask = segment_arr[:, self.RIGHT_HAND_MASK_IDX] > 0.5
+                hand_presence_ratio = float(np.mean(lh_mask | rh_mask))
+
+                if hand_presence_ratio < 0.30:
+                    logger.debug(
+                        "Discarding candidate segment (%d frames): Hand presence ratio %.2f < 0.30",
+                        len(segment_arr), hand_presence_ratio
+                    )
+                    segment_ready = False
+                    segment_data = None
+                else:
+                    segment_data = segment_arr
+                    self.sentences_segmented += 1
 
                 # Reset for next sentence
                 self.is_signing = False

@@ -14,6 +14,10 @@ from src.serve.inference import ASLInferencePipeline
 from src.serve.segmenter import ContinuousSignSegmenter
 from src.serve.server import DEFAULT_IPCAM_URL, app, normalize_ipcam_url, server_config
 
+# These tests exercise the legacy How2Sign T5 model; skip them where its checkpoint is not present (e.g. cloud bundle).
+requires_t5 = pytest.mark.skipif(not Path("checkpoints/t5/best_model.pt").exists(),
+                                 reason="legacy T5 checkpoint not present")
+
 
 @pytest.fixture
 def segmenter():
@@ -70,6 +74,7 @@ def test_segmenter_detects_active_signing_and_pause(segmenter):
     assert emitted_data.shape[0] >= 10
 
 
+@requires_t5
 def test_inference_pipeline_execution():
     """Verifies inference pipeline runs and produces text on synthetic landmarks."""
     pipeline = ASLInferencePipeline(
@@ -87,6 +92,7 @@ def test_inference_pipeline_execution():
     assert result["latency_ms"] < 2000.0, f"Latency {result['latency_ms']} ms exceeds 2s limit"
 
 
+@requires_t5
 def test_fastapi_endpoints():
     """Verifies HTTP health and status endpoints."""
     server_config["model_type"] = "t5"
@@ -113,6 +119,7 @@ def test_fastapi_endpoints():
     assert "val_clips" in clips_data
 
 
+@requires_t5
 def test_websocket_stream_flow():
     """Verifies WebSocket endpoint receives frames and acknowledges."""
     server_config["model_type"] = "t5"
@@ -154,6 +161,7 @@ def test_normalize_ipcam_url():
     assert exc_info.value.status_code == 400
 
 
+@requires_t5
 def test_ipcam_endpoints_and_status():
     """Verifies default IP Webcam config in /api/status and input validation."""
     server_config["model_type"] = "t5"

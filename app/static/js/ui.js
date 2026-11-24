@@ -18,6 +18,38 @@ const inputIpcamUrl = document.getElementById("input-ipcam-url");
 const ipcamStatusEl = document.getElementById("ipcam-status");
 const btnMirror = document.getElementById("btn-mirror");
 const btnForceCut = document.getElementById("btn-force-cut");
+const btnModeWord = document.getElementById("btn-mode-word");
+const btnModeSentence = document.getElementById("btn-mode-sentence");
+
+// Recognition mode ("word" | "sentence"), remembered per browser.
+let recognitionMode = "sentence";
+try {
+  const saved = localStorage.getItem("asl-mode");
+  if (saved === "word" || saved === "sentence") recognitionMode = saved;
+} catch (e) { /* storage unavailable: keep default */ }
+
+function renderMode(mode) {
+  recognitionMode = mode;
+  if (btnModeWord) {
+    btnModeWord.classList.toggle("active", mode === "word");
+    btnModeWord.setAttribute("aria-pressed", String(mode === "word"));
+  }
+  if (btnModeSentence) {
+    btnModeSentence.classList.toggle("active", mode === "sentence");
+    btnModeSentence.setAttribute("aria-pressed", String(mode === "sentence"));
+  }
+}
+
+function setMode(mode) {
+  renderMode(mode);
+  try { localStorage.setItem("asl-mode", mode); } catch (e) { /* ignore */ }
+  if (wsClient) wsClient.sendMode(mode);
+  if (bannerMeta) {
+    bannerMeta.textContent = mode === "word"
+      ? "Word mode: sign one word, then pause briefly."
+      : "Sentence mode: sign several words, then lower your hands.";
+  }
+}
 const btnClearTranscript = document.getElementById("btn-clear-transcript");
 const btnSimulate = document.getElementById("btn-simulate");
 const selectSampleClip = document.getElementById("select-sample-clip");
@@ -626,6 +658,8 @@ function toggleMirror() {
 function initWebSocket() {
   wsClient = new ASLWebSocketClient({
     binaryMode: true,
+    mode: recognitionMode,
+    onMode: (mode) => renderMode(mode),
     onConnectionChange: (connected) => {
       if (connDot) {
         connDot.className = "status-dot " + (connected ? "connected" : "disconnected");
@@ -662,6 +696,10 @@ function initWebSocket() {
     onTranslation: (data) => {
       handleTranslationResult(data);
     },
+    onLiveWords: (data) => {
+      const ws = (data.words || []).map((w) => `${w.gloss.toUpperCase()} ${Math.round(w.conf * 100)}%`);
+      if (bannerMeta && ws.length) bannerMeta.textContent = `Hearing signs: ${ws.join("  ·  ")}`;
+    },
     onNotice: (data) => {
       if (bannerMeta && data.message) {
         bannerMeta.textContent = data.message;
@@ -687,7 +725,7 @@ function handleTranslationResult(data) {
     hudStatus.textContent = "Translated";
   }
 
-  const text = data.text || "(no speech detected)";
+  const text = data.text || (data.mode === "word" ? "(sign not recognised, try again)" : "(no signs recognised)");
 
   // Update current banner
   if (bannerText) {
@@ -695,7 +733,12 @@ function handleTranslationResult(data) {
     bannerText.classList.remove("empty");
   }
   if (bannerMeta) {
-    bannerMeta.textContent = `${data.num_frames} frames | ${data.latency_ms} ms (${data.reason || "boundary"})`;
+    const fmt = (g) => `${g.gloss.toUpperCase()} ${Math.round(g.conf * 100)}%`;
+    const gl = (data.glosses || []).map(fmt).join("  ·  ");
+    const alts = (data.alternatives || []).filter((a) => !(data.glosses || []).some((g) => g.gloss === a.gloss)).map(fmt).join("  ·  ");
+    const label = data.mode === "word" ? "Word" : "Signs";
+    bannerMeta.textContent = (gl ? `${label}: ${gl} | ` : "") + (alts ? `Other guesses: ${alts} | ` : "")
+      + `${data.num_frames} frames | ${data.latency_ms} ms`;
   }
 
   // Prepend to transcript history
@@ -792,7 +835,7 @@ async function runClipSimulation() {
       } else {
         // Feed rest frames (15 frames) to trigger sentence boundary cut
         const restVec = new Float32Array(1200);
-        for (let r = 0; r < 15; r++) {
+        for (let r = 0; r < 30; r++) {
           wsClient.sendFrame(restVec);
         }
         clearInterval(simulationInterval);
@@ -860,6 +903,10 @@ document.addEventListener("DOMContentLoaded", () => {
   if (btnMirror) btnMirror.addEventListener("click", toggleMirror);
   if (btnSimulate) btnSimulate.addEventListener("click", runClipSimulation);
 
+  renderMode(recognitionMode);
+  if (btnModeWord) btnModeWord.addEventListener("click", () => setMode("word"));
+  if (btnModeSentence) btnModeSentence.addEventListener("click", () => setMode("sentence"));
+
   if (btnForceCut) {
     btnForceCut.addEventListener("click", () => {
       if (wsClient) wsClient.sendForceCut();
@@ -876,3 +923,14 @@ document.addEventListener("DOMContentLoaded", () => {
     });
   }
 });
+
+
+// Supported-word panel (sign recogniser vocabulary)
+(async function loadVocab() {
+  const el = document.getElementById("vocab-list");
+  if (!el) return;
+  try {
+    const d = await (await fetch("/api/vocab")).json();
+    if (d.words && d.words.length) el.textContent = `${d.count} supported signs: ` + d.words.join(", ");
+  } catch (e) { /* optional panel */ }
+})();

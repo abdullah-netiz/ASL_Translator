@@ -22,6 +22,10 @@ export class ASLWebSocketClient {
     this.onTranslating = options.onTranslating || (() => {});
     this.onTranslation = options.onTranslation || (() => {});
     this.onNotice = options.onNotice || (() => {});
+    this.onLiveWords = options.onLiveWords || (() => {});
+    this.onMode = options.onMode || (() => {});
+    // "sentence" (several signs -> English sentence) or "word" (one sign -> that word). Re-sent on every (re)connect.
+    this.mode = options.mode || "sentence";
     this.onError = options.onError || (() => {});
   }
 
@@ -48,6 +52,7 @@ export class ASLWebSocketClient {
           this.reconnectTimer = null;
         }
         this.onConnectionChange(true);
+        this.sendMode(this.mode);
       };
 
       this.ws.onclose = () => {
@@ -99,6 +104,13 @@ export class ASLWebSocketClient {
       case "notice":
         this.onNotice(data);
         break;
+      case "live_words":
+        if (this.onLiveWords) this.onLiveWords(data);
+        break;
+      case "mode_ack":
+        this.mode = data.mode;
+        this.onMode(data.mode);
+        break;
       case "connected":
       case "pong":
       case "reset_ack":
@@ -124,6 +136,13 @@ export class ASLWebSocketClient {
       // Fallback JSON
       const arr = Array.isArray(vector) ? vector : Array.from(vector);
       this.ws.send(JSON.stringify({ type: "frame", landmarks: arr }));
+    }
+  }
+
+  sendMode(mode) {
+    this.mode = mode;
+    if (this.isConnected && this.ws && this.ws.readyState === WebSocket.OPEN) {
+      this.ws.send(JSON.stringify({ type: "set_mode", mode }));
     }
   }
 

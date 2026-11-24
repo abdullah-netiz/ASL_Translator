@@ -63,6 +63,18 @@ DEFAULT_IPCAM_URL = "http://172.15.45.93:8080/video"
 pipeline: ASLInferencePipeline | None = None
 _pipeline_lock = threading.Lock()
 server_config: dict[str, Any] = {}
+DEMO_VOCAB = _REPO_ROOT / "data" / "aslcitizen" / "vocab_demo.txt"
+
+
+def _active_vocab() -> str | None:
+    """Word list the live recognizer is restricted to: --vocab file, 'all' = full model vocabulary,
+    default = the curated everyday/conversational demo list (higher accuracy) when present."""
+    v = server_config.get("vocab")
+    if v == "all":
+        return None
+    if v:
+        return v
+    return str(DEMO_VOCAB) if DEMO_VOCAB.exists() else None
 
 
 def normalize_ipcam_url(raw_url: str) -> str:
@@ -105,10 +117,16 @@ def get_pipeline() -> ASLInferencePipeline:
     if pipeline is None:
         with _pipeline_lock:
             if pipeline is None:
-                model_type = server_config.get("model_type", "t5")
-                checkpoint = server_config.get("checkpoint", None)
+                model_type = server_config.get("model_type") or ("sign" if (_REPO_ROOT / "checkpoints/sign/final").exists() else "t5")
+                if model_type == "sign" and not server_config.get("sign_checkpoint") and (_REPO_ROOT / "checkpoints/sign/final_custom").exists():
+                    server_config["sign_checkpoint"] = str(_REPO_ROOT / "checkpoints/sign/final_custom")
+                checkpoint = server_config.get("checkpoint", None) if model_type != "sign" else server_config.get("sign_checkpoint")
                 cfg_path = server_config.get("config", None)
                 beam_size = server_config.get("beam_size", 5)
+                if model_type == "sign":
+                    from src.sign.recognizer import SignTranslator
+                    pipeline = SignTranslator(checkpoint=checkpoint, composer_model=server_config.get("composer", "Qwen/Qwen2.5-3B-Instruct"), active_vocab=_active_vocab(), **({"min_raw": server_config["min_raw"]} if server_config.get("min_raw") is not None else {}))
+                    return pipeline
                 pipeline = ASLInferencePipeline(
                     model_type=model_type,
                     config_path=cfg_path,
@@ -154,9 +172,20 @@ async def get_status() -> dict[str, Any]:
     }
 
 
+@app.get("/api/vocab")
+async def get_vocab() -> dict[str, Any]:
+    """Words the sign recogniser can currently understand (for the dashboard's help panel)."""
+    p = await get_pipeline_async()
+    words = list(getattr(p, "active_words", [g for g in getattr(p, "glosses", []) if g != "_none_"]))
+    return {"count": len(words), "words": sorted(words)}
+
+
 @app.get("/api/sample-clips")
 async def list_sample_clips() -> dict[str, Any]:
     """Returns a list of pre-extracted test/val clips for simulation in browser."""
+    wl = _wlasl_test_clips()
+    if wl:
+        return {"val_clips": wl, "test_clips": []}
     val_dir = _REPO_ROOT / "data" / "landmarks" / "val"
     test_dir = _REPO_ROOT / "data" / "landmarks" / "test"
 
@@ -167,6 +196,25 @@ async def list_sample_clips() -> dict[str, Any]:
         "val_clips": val_clips,
         "test_clips": test_clips,
     }
+
+
+def _wlasl_test_clips(n_per_word: int = 1) -> list[str]:
+    """Held-out WLASL test clips named '<gloss>__<video_id>.npy' for browser simulation."""
+    try:
+        from src.sign.data import load_manifest
+        vocab = _REPO_ROOT / "data" / "wlasl" / "vocab_convo.txt"
+        if not vocab.exists() or not (_REPO_ROOT / "checkpoints/sign/final").exists():
+            return []
+        glosses, split = load_manifest(9999, vocab=str(vocab))
+        seen: dict[str, int] = {}
+        out = []
+        for vid, y in split["test"]:
+            if seen.get(glosses[y], 0) < n_per_word:
+                seen[glosses[y]] = seen.get(glosses[y], 0) + 1
+                out.append(f"{glosses[y]}__{vid}.npy")
+        return sorted(out)
+    except Exception:
+        return []
 
 
 def _lookup_reference_sentence(split: str, clip_stem: str) -> str:
@@ -189,6 +237,15 @@ async def get_sample_clip(split: str, clip_name: str) -> Any:
     """Returns frames of a sample clip formatted as JSON array for client simulation."""
     if split not in ("val", "test", "train"):
         raise HTTPException(status_code=400, detail="Invalid split")
+
+    if "__" in clip_name:   # WLASL word clip: '<gloss>__<video_id>.npy'
+        gloss, vid = clip_name[:-4].split("__", 1)
+        wpath = _REPO_ROOT / "data" / "wlasl" / "landmarks" / f"{vid}.npy"
+        if not wpath.exists() or not vid.isalnum():
+            raise HTTPException(status_code=404, detail="Clip not found")
+        arr = np.load(wpath).astype(np.float32)
+        return {"clip_name": clip_name, "split": split, "num_frames": arr.shape[0],
+                "feature_dim": arr.shape[1], "reference_text": f"sign for '{gloss}'", "frames": arr.tolist()}
 
     clip_path = _REPO_ROOT / "data" / "landmarks" / split / clip_name
     if not clip_path.exists():
@@ -228,7 +285,10 @@ async def test_ipcam_connection(
 ) -> dict[str, Any]:
     """Tests connectivity to an IP Webcam stream and returns the normalized URL."""
     resolved_url = normalize_ipcam_url(url)
-    timeout = httpx.Timeout(connect=3.0, read=4.0, write=3.0, pool=3.0)
+    parsed = urlparse(resolved_url)
+    host_port = parsed.netloc
+
+    timeout = httpx.Timeout(connect=3.5, read=4.5, write=3.5, pool=3.5)
     try:
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
             async with client.stream("GET", resolved_url) as resp:
@@ -236,7 +296,7 @@ async def test_ipcam_connection(
                     return {
                         "ok": False,
                         "resolved_url": resolved_url,
-                        "error": f"IP Webcam returned HTTP {resp.status_code}",
+                        "error": f"IP Webcam responded with HTTP {resp.status_code}. Ensure stream path is /video.",
                     }
                 content_type = resp.headers.get("content-type", "application/octet-stream")
                 return {
@@ -244,12 +304,44 @@ async def test_ipcam_connection(
                     "resolved_url": resolved_url,
                     "content_type": content_type,
                 }
-    except Exception as exc:
-        logger.warning("IP Webcam connectivity test failed for %s: %s", resolved_url, exc)
+    except httpx.ConnectTimeout:
+        logger.warning("IP Webcam connection timed out for %s", resolved_url)
         return {
             "ok": False,
             "resolved_url": resolved_url,
-            "error": str(exc),
+            "error": (
+                f"Connection timed out to {host_port}. "
+                "Ensure your phone is unlocked, IP Webcam app is open with 'Start server' active, "
+                "and the IP on the phone screen matches."
+            ),
+        }
+    except httpx.ConnectError as exc:
+        logger.warning("IP Webcam connection failed for %s: %s", resolved_url, exc)
+        return {
+            "ok": False,
+            "resolved_url": resolved_url,
+            "error": (
+                f"Could not reach {host_port}. "
+                "Ensure your phone and PC are on the same Wi-Fi network and 'Start server' is running in IP Webcam."
+            ),
+        }
+    except httpx.ReadTimeout:
+        logger.warning("IP Webcam read timed out for %s", resolved_url)
+        return {
+            "ok": False,
+            "resolved_url": resolved_url,
+            "error": (
+                f"Connected to {host_port}, but video stream timed out. "
+                "Check camera permissions and keep the phone screen awake."
+            ),
+        }
+    except Exception as exc:
+        logger.warning("IP Webcam connectivity test failed for %s: %s", resolved_url, exc)
+        err_msg = str(exc).strip() or type(exc).__name__
+        return {
+            "ok": False,
+            "resolved_url": resolved_url,
+            "error": f"Failed to reach {host_port}: {err_msg}",
         }
 
 
@@ -264,7 +356,7 @@ async def proxy_ipcam_stream(
     without CORS or tainted-canvas restrictions.
     """
     resolved_url = normalize_ipcam_url(url)
-    timeout = httpx.Timeout(connect=4.0, read=5.0, write=4.0, pool=4.0)
+    timeout = httpx.Timeout(connect=5.0, read=None, write=5.0, pool=5.0)
 
     client = httpx.AsyncClient(timeout=timeout, follow_redirects=True)
     try:
@@ -393,13 +485,43 @@ async def websocket_translate(websocket: WebSocket) -> None:
     """
     await websocket.accept()
     p = await get_pipeline_async()
+    is_sign = getattr(p, "model_type", "") == "sign"
+    # Sign mode: a sentence = several signs separated by short pauses, so wait ~1.4 s of
+    # idle (21 frames @15fps) before closing the utterance; the recogniser splits it into words.
     segmenter = ContinuousSignSegmenter(
-        min_frames=server_config.get("min_frames", 12),
-        max_frames=server_config.get("max_frames", 240),
-        pause_frames=server_config.get("pause_frames", 12),
+        min_frames=server_config.get("min_frames") or (10 if is_sign else 12),
+        max_frames=server_config.get("max_frames", 300 if is_sign else 240),
+        pause_frames=server_config.get("pause_frames") or (21 if is_sign else 12),
         motion_threshold=server_config.get("motion_threshold", 0.08),
         wrist_drop_threshold=server_config.get("wrist_drop_threshold", 2.2),
     )
+
+    # Recognition mode per connection: "sentence" (several signs -> composed English) or "word" (one sign -> that word,
+    # short pause ends it, no sentence composer). The dashboard switches with {"type": "set_mode", "mode": "word"}.
+    SENTENCE_PAUSE = segmenter.pause_frames
+    WORD_PAUSE = server_config.get("word_pause_frames") or 9          # ~0.6 s @ 15 fps
+    mode = "sentence"
+
+    def run_translate(seg_arr: np.ndarray) -> dict[str, Any]:
+        if is_sign and mode == "word":
+            return p.translate_word(seg_arr)
+        return p.translate(seg_arr)
+
+    def result_msg(t_res: dict[str, Any], reason: str) -> dict[str, Any]:
+        return {
+            "type": "translation",
+            "text": t_res["text"],
+            "glosses": t_res.get("glosses", []),
+            "alternatives": t_res.get("alternatives", []),
+            "mode": mode,
+            "tokens": t_res["tokens"],
+            "num_tokens": t_res["num_tokens"],
+            "num_frames": t_res["num_frames"],
+            "latency_ms": t_res["latency_ms"],
+            "fps_processed": t_res["fps_processed"],
+            "reason": reason,
+            "timestamp": time.time(),
+        }
 
     logger.info("WebSocket client connected to /ws/translate")
     await websocket.send_json({
@@ -407,6 +529,8 @@ async def websocket_translate(websocket: WebSocket) -> None:
         "model_type": p.model_type,
         "device": str(p.device),
         "message": "Connected to ASL Translation WebSocket server.",
+        "mode": mode,
+        "modes": ["sentence", "word"] if is_sign else ["sentence"],
     })
 
     frame_counter = 0
@@ -435,6 +559,14 @@ async def websocket_translate(websocket: WebSocket) -> None:
                 if msg_type == "ping":
                     await websocket.send_json({"type": "pong", "time": time.time()})
                     continue
+                elif msg_type == "set_mode":
+                    want = data.get("mode", "sentence")
+                    if want in ("sentence", "word") and (is_sign or want == "sentence"):
+                        mode = want
+                        segmenter.pause_frames = WORD_PAUSE if mode == "word" else SENTENCE_PAUSE
+                        segmenter.reset()
+                    await websocket.send_json({"type": "mode_ack", "mode": mode})
+                    continue
                 elif msg_type == "reset":
                     segmenter.reset()
                     await websocket.send_json({"type": "reset_ack", "message": "Segmenter reset"})
@@ -454,18 +586,8 @@ async def websocket_translate(websocket: WebSocket) -> None:
                             "num_frames": len(seg_arr),
                             "reason": "force_cut",
                         })
-                        t_res = await asyncio.to_thread(p.translate, seg_arr)
-                        await websocket.send_json({
-                            "type": "translation",
-                            "text": t_res["text"],
-                            "tokens": t_res["tokens"],
-                            "num_tokens": t_res["num_tokens"],
-                            "num_frames": t_res["num_frames"],
-                            "latency_ms": t_res["latency_ms"],
-                            "fps_processed": t_res["fps_processed"],
-                            "reason": "force_cut",
-                            "timestamp": time.time(),
-                        })
+                        t_res = await asyncio.to_thread(run_translate, seg_arr)
+                        await websocket.send_json(result_msg(t_res, "force_cut"))
                     else:
                         await websocket.send_json({
                             "type": "notice",
@@ -485,6 +607,15 @@ async def websocket_translate(websocket: WebSocket) -> None:
 
             # Process frame through online segmenter
             segment_ready, segment_data, info = segmenter.process_frame(frame)
+
+            # Sign mode: stream live word candidates while the user is signing
+            if is_sign and info["is_signing"] and frame_counter % 8 == 0 and len(segmenter.current_frames) >= 10:
+                cur = np.array(segmenter.current_frames, dtype=np.float32)
+                if mode == "word":
+                    words = (await asyncio.to_thread(p.recognize_word, cur))[0]
+                else:
+                    words = await asyncio.to_thread(p.recognize, cur)
+                await websocket.send_json({"type": "live_words", "words": [{"gloss": g, "conf": round(c, 2)} for g, c in words]})
 
             # Send periodic state update back to client (every 3 frames)
             if frame_counter % 3 == 0:
@@ -513,7 +644,7 @@ async def websocket_translate(websocket: WebSocket) -> None:
                 })
 
                 # Run translation (non-blocking for event loop)
-                t_res = await asyncio.to_thread(p.translate, segment_data)
+                t_res = await asyncio.to_thread(run_translate, segment_data)
 
                 logger.info(
                     "Translated in %.1f ms: '%s'",
@@ -521,17 +652,7 @@ async def websocket_translate(websocket: WebSocket) -> None:
                 )
 
                 # Push translation result to dashboard
-                await websocket.send_json({
-                    "type": "translation",
-                    "text": t_res["text"],
-                    "tokens": t_res["tokens"],
-                    "num_tokens": t_res["num_tokens"],
-                    "num_frames": t_res["num_frames"],
-                    "latency_ms": t_res["latency_ms"],
-                    "fps_processed": t_res["fps_processed"],
-                    "reason": info["cut_reason"],
-                    "timestamp": time.time(),
-                })
+                await websocket.send_json(result_msg(t_res, info["cut_reason"]))
 
     except WebSocketDisconnect:
         logger.info("WebSocket client disconnected")
@@ -562,12 +683,20 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Run ASL Real-Time Translation Server")
     parser.add_argument("--host", default="0.0.0.0", help="Host interface to bind")
     parser.add_argument("--port", type=int, default=8000, help="Port to bind")
-    parser.add_argument("--model-type", default="t5", choices=["t5", "transformer", "lstm"], help="Model type")
+    parser.add_argument("--model-type", default="sign", choices=["sign", "t5", "transformer", "lstm"], help="Model type")
     parser.add_argument("--config", default="configs/t5_decoder.yaml", help="Path to model config")
     parser.add_argument("--checkpoint", default="checkpoints/t5/best_model.pt", help="Path to checkpoint")
     parser.add_argument("--beam-size", type=int, default=5, help="Beam width for translation")
-    parser.add_argument("--min-frames", type=int, default=15, help="Min frames for sentence boundary")
-    parser.add_argument("--pause-frames", type=int, default=12, help="Pause frames to cut sentence")
+    parser.add_argument("--min-frames", type=int, default=None, help="Min frames for sentence boundary")
+    parser.add_argument("--pause-frames", type=int, default=None, help="Pause frames to cut sentence")
+    parser.add_argument("--vocab", default=None, help="Word-list file restricting the sign vocabulary (default: data/aslcitizen/vocab_demo.txt; 'all' = every trained word)")
+    parser.add_argument("--composer", default="auto",
+                        choices=["auto", "qwen-1.5b-lora", "qwen-3b-lora", "qwen-3b", "qwen-1.5b", "none"],
+                        help="Sentence model: auto = fine-tuned Qwen2.5-1.5B (best measured); qwen-3b = stock 3B "
+                             "(needs ~8 GB free VRAM); none = show recognised words only")
+    parser.add_argument("--min-raw", type=float, default=None,
+                        help="Raw-probability floor for a sign (default 0.2). Higher = fewer false words for signs outside "
+                             "the word list, lower = more words recognised. 0 = old behaviour")
     parser.add_argument("--ipcam-url", default=DEFAULT_IPCAM_URL, help="Default IP Webcam stream URL")
     args = parser.parse_args()
 
@@ -578,6 +707,10 @@ def main() -> None:
     server_config["min_frames"] = args.min_frames
     server_config["pause_frames"] = args.pause_frames
     server_config["ipcam_url"] = args.ipcam_url
+    server_config["vocab"] = args.vocab
+    server_config["min_raw"] = args.min_raw
+    if args.composer != "auto":
+        server_config["composer"] = None if args.composer == "none" else args.composer
 
     # Pre-load pipeline to verify checkpoint and warm up GPU before listening
     logger.info("Pre-warming ASLInferencePipeline...")

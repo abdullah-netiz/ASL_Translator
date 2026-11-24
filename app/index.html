@@ -55,6 +55,11 @@
           <button id="btn-mirror" class="btn">Toggle Mirror</button>
           <button id="btn-force-cut" class="btn">Force Translate</button>
         </div>
+        <div class="btn-group mode-switch" role="group" aria-label="Recognition mode">
+          <span class="mode-label">Mode:</span>
+          <button id="btn-mode-word" class="btn mode-btn" aria-pressed="false" title="One sign at a time: shows the single word, ends after a short pause">Word</button>
+          <button id="btn-mode-sentence" class="btn mode-btn active" aria-pressed="true" title="Several signs: builds an English sentence, ends after ~1.4 s pause">Sentence</button>
+        </div>
         <div class="btn-group">
           <button id="btn-clear-transcript" class="btn">Clear Transcript</button>
         </div>
@@ -108,6 +113,7 @@
       <div class="transcript-header">
         <div class="card-title">Continuous Transcript</div>
       </div>
+      <div id="vocab-list" style="font-size:12px;opacity:.75;margin:6px 0;line-height:1.5"></div>
       <div id="transcript-list" class="transcript-list">
         <!-- Translation history entries prepended here -->
       </div>
@@ -119,7 +125,7 @@
     <div class="metrics-bar">
       <div class="metric-item">
         <span class="metric-label">Model:</span>
-        <span id="val-model-type" class="metric-val">T5-SMALL</span>
+        <span id="val-model-type" class="metric-val">SIGN CLASSIFIER + QWEN2.5-1.5B (FINE-TUNED)</span>
       </div>
       <div class="metric-item">
         <span class="metric-label">Engine:</span>
