@@ -1,0 +1,36 @@
+{
+  "results": [
+    {
+      "fraction": 0.25,
+      "num_samples": 25,
+      "train_loss": 6.47485106023728,
+      "val_loss": 6.717280569747673,
+      "bleu": 0.02,
+      "bleu_1": 0.98,
+      "bleu_4": 0.0,
+      "rouge_l": 3.41
+    },
+    {
+      "fraction": 0.5,
+      "num_samples": 50,
+      "train_loss": 6.278468167238008,
+      "val_loss": 6.273038683095049,
+      "bleu": 0.0,
+      "bleu_1": 94.2,
+      "bleu_4": 5.0,
+      "rouge_l": 0.92
+    },
+    {
+      "fraction": 1.0,
+      "num_samples": 100,
+      "train_loss": 6.112339046403501,
+      "val_loss": 6.241189701882369,
+      "bleu": 0.0,
+      "bleu_1": 100.0,
+      "bleu_4": 0.0,
+      "rouge_l": 0.0
+    }
+  ],
+  "recommendation": "Scaling data NOT justified yet: gains have plateaued or gap is small. Focus on architecture, augmentation, or pretraining first.",
+  "decision": "STAY_WITH_CURRENT_DATA"
+}

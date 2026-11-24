@@ -1,0 +1,39 @@
+# MediaPipe version pinned: 0.10.14
+mediapipe_version: "0.10.14"
+
+# Pose: upper body landmark indices (from MediaPipe Holistic 33-point pose)
+pose_indices: [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16]
+# 0=nose 1=left_eye_inner 2=left_eye 3=left_eye_outer 4=right_eye_inner
+# 5=right_eye 6=right_eye_outer 7=left_ear 8=right_ear
+# 9=mouth_left 10=mouth_right 11=left_shoulder 12=right_shoulder
+# 13=left_elbow 14=right_elbow 15=left_wrist 16=right_wrist
+# (hips excluded for now — 23/24 can be added later)
+
+# Left and right hands: all 21 landmarks each
+num_hand_landmarks: 21
+
+# Face: reduced subset — lips, eyebrows, eye contours, face oval (~68 points)
+# From MediaPipe 468-point face mesh
+face_indices: [
+  # Lips outer (20 pts)
+  61,185,40,39,37,0,267,269,270,409,291,146,91,181,84,17,314,405,321,375,
+  # Eyebrows (10 pts)
+  70,63,105,66,107,336,296,334,293,300,
+  # Left eye (6 pts)
+  33,246,161,160,159,158,
+  # Right eye (6 pts)
+  362,398,384,385,386,387,
+  # Face contour (17 pts)
+  10,338,297,332,284,251,389,356,454,323,361,288,397,365,379,378,400
+]
+
+# Features per landmark: x, y, z, visibility (4 values)
+features_per_point: 4
+
+# Normalization reference landmarks (pose indices within full 33-point pose)
+left_shoulder_idx: 11
+right_shoulder_idx: 12
+
+# Wrist reference (for hand-relative normalization)
+left_wrist_pose_idx: 15
+right_wrist_pose_idx: 16

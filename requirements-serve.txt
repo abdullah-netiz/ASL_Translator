@@ -1,0 +1,16 @@
+# Minimal dependencies to RUN the translator server (no training, no MediaPipe: landmarks are extracted in the browser).
+# For cloud notebooks (Kaggle / Colab, Python 3.10-3.12): keep their pre-installed CUDA torch and install the rest:
+#   pip install -r requirements-serve.txt
+# torch>=2.1 must already be installed (it is on Kaggle/Colab GPU images); locally use requirements.txt instead.
+transformers==4.46.3
+peft==0.13.2
+accelerate>=0.31,<2
+fastapi>=0.110,<1
+uvicorn>=0.29,<1
+websockets>=12
+httpx>=0.27
+numpy>=1.26
+pyyaml>=6
+sentencepiece>=0.2
+nltk>=3.8
+sacrebleu>=2.4

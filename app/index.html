@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ASL Real-Time Translation Dashboard</title>
+  <link rel="stylesheet" href="/static/css/style.css">
+  
+  <!-- MediaPipe CDN scripts -->
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/holistic/holistic.js" crossorigin="anonymous"></script>
+</head>
+<body>
+
+  <!-- Top Navigation Header -->
+  <header>
+    <div class="brand">
+      <div class="brand-icon">ASL</div>
+      <div>
+        <h1>ASL Translator</h1>
+        <div class="brand-subtitle">Real-Time Continuous ASL-to-English (MediaPipe Holistic + T5)</div>
+      </div>
+    </div>
+
+    <div class="header-badges">
+      <div class="status-pill">
+        <span id="conn-dot" class="status-dot disconnected"></span>
+        <span id="conn-text">Connecting...</span>
+      </div>
+    </div>
+  </header>
+
+  <!-- Main Grid Layout -->
+  <main>
+    <!-- Left Stage: Video Preview & Camera Controls -->
+    <section class="video-card">
+      <div class="video-container">
+        <video id="webcam-video" autoplay playsinline muted></video>
+        <canvas id="ipcam-canvas" class="hidden"></canvas>
+        <canvas id="overlay-canvas"></canvas>
+
+        <!-- In-video HUD tags -->
+        <div class="hud-overlay">
+          <div id="hud-status" class="hud-tag">Initializing...</div>
+          <div id="hud-hands" class="hud-tag">Pose: – | L: – | R: –</div>
+          <div id="hud-fps" class="hud-tag">0 FPS</div>
+        </div>
+      </div>
+
+      <!-- Controls Toolbar -->
+      <div class="controls-bar">
+        <div class="btn-group">
+          <button id="btn-toggle-camera" class="btn btn-primary">Start Local Camera</button>
+          <button id="btn-mirror" class="btn">Toggle Mirror</button>
+          <button id="btn-force-cut" class="btn">Force Translate</button>
+        </div>
+        <div class="btn-group mode-switch" role="group" aria-label="Recognition mode">
+          <span class="mode-label">Mode:</span>
+          <button id="btn-mode-word" class="btn mode-btn" aria-pressed="false" title="One sign at a time: shows the single word, ends after a short pause">Word</button>
+          <button id="btn-mode-sentence" class="btn mode-btn active" aria-pressed="true" title="Several signs: builds an English sentence, ends after ~1.4 s pause">Sentence</button>
+        </div>
+        <div class="btn-group">
+          <button id="btn-clear-transcript" class="btn">Clear Transcript</button>
+        </div>
+      </div>
+
+      <!-- IP Webcam Panel (for PCs without a built-in camera) -->
+      <div class="ipcam-panel">
+        <div class="ipcam-row">
+          <span class="sim-label">IP Webcam URL:</span>
+          <input
+            id="input-ipcam-url"
+            type="text"
+            class="text-input"
+            value="http://172.15.45.93:8080/video"
+            placeholder="http://172.15.45.93:8080/video"
+            aria-label="IP Webcam URL"
+          >
+          <button id="btn-toggle-ipcam" class="btn btn-cyan">Connect IP Webcam</button>
+        </div>
+        <div id="ipcam-status" class="ipcam-status">
+          Default phone IP Webcam configured: 172.15.45.93:8080 (proxied via server for MediaPipe)
+        </div>
+      </div>
+
+      <!-- Sample Clip Simulation Panel (for testing without a live camera) -->
+      <div class="simulation-panel">
+        <span class="sim-label">Simulation Mode:</span>
+        <select id="select-sample-clip">
+          <option value="">Loading sample clips...</option>
+        </select>
+        <button id="btn-simulate" class="btn">Simulate Selected Clip</button>
+      </div>
+    </section>
+
+    <!-- Right Stage: Live Translation Banner & Transcript History -->
+    <section class="results-card">
+      <div class="card-title">Live Translation</div>
+
+      <!-- Current Sentence Banner -->
+      <div class="live-banner-container">
+        <div class="live-banner-header">
+          <span>Active Sentence</span>
+          <span id="banner-meta">Awaiting sign input...</span>
+        </div>
+        <div id="banner-text" class="live-banner-text empty">
+          Start signing in front of your camera or click "Simulate Selected Clip" below.
+        </div>
+      </div>
+
+      <!-- Continuous Transcript History -->
+      <div class="transcript-header">
+        <div class="card-title">Continuous Transcript</div>
+      </div>
+      <div id="vocab-list" style="font-size:12px;opacity:.75;margin:6px 0;line-height:1.5"></div>
+      <div id="transcript-list" class="transcript-list">
+        <!-- Translation history entries prepended here -->
+      </div>
+    </section>
+  </main>
+
+  <!-- Bottom Metrics Bar -->
+  <footer>
+    <div class="metrics-bar">
+      <div class="metric-item">
+        <span class="metric-label">Model:</span>
+        <span id="val-model-type" class="metric-val">SIGN CLASSIFIER + QWEN2.5-1.5B (FINE-TUNED)</span>
+      </div>
+      <div class="metric-item">
+        <span class="metric-label">Engine:</span>
+        <span id="val-device" class="metric-val">CUDA (RTX 4000)</span>
+      </div>
+      <div class="metric-item">
+        <span class="metric-label">Last Latency:</span>
+        <span id="val-latency" class="metric-val">-- ms</span>
+      </div>
+      <div class="metric-item">
+        <span class="metric-label">Sentences:</span>
+        <span id="val-sentences" class="metric-val">0</span>
+      </div>
+    </div>
+    <div>ASL Translation Pipeline • How2Sign Frontal Benchmark</div>
+  </footer>
+
+  <!-- App UI Script Entry -->
+  <script type="module" src="/static/js/ui.js"></script>
+</body>
+</html>
