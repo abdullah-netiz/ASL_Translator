@@ -1,92 +1,26 @@
-# Real-Time ASL Translation Web Dashboard
+# Web dashboard
 
-A browser-based real-time continuous American Sign Language (ASL) to English translation application powered by **MediaPipe Holistic** landmark extraction in JavaScript, a **FastAPI + WebSocket** server, online **temporal sentence segmentation**, and a **Transformer + Pretrained T5** translation engine.
+The browser front-end of the ASL translator. It is served by the FastAPI server at `/`. There is no build step.
 
----
+| File | Role |
+|---|---|
+| `index.html` | Layout: camera view with skeleton overlay, current sentence, transcript, recognised words, vocabulary panel, HUD |
+| `static/js/landmarks.js` | Runs MediaPipe Holistic and converts each frame into the 1,200-number feature vector (bit-for-bit match with `src/extract/normalize.py`) |
+| `static/js/socket.js` | WebSocket client for `/ws/translate`: streams frames, handles `status`, `live_words`, `translation` |
+| `static/js/ui.js` | Camera / IP-webcam input, skeleton drawing, simulation of test clips, rendering of results |
+| `static/css/style.css` | Dark theme, responsive layout |
 
-## Architecture Overview
+What the user sees:
 
-```
- [Webcam Video / Simulator]
-            │
-            ▼
- [MediaPipe Holistic JS] ────► Extracts Pose (17), Hands (2x21), Face (59)
-            │
-            ▼
- [LandmarkNormalizer (JS)] ──► Shoulder-centered, wrist-relative, velocity delta (1200 floats)
-            │
-            ▼ (Binary Float32Array over WebSocket)
- [/ws/translate (FastAPI)]
-            │
-            ▼
- [ContinuousSignSegmenter] ──► Detects pauses, wrist dropping, and sentence boundaries
-            │ (On boundary cut)
-            ▼
- [ASLInferencePipeline]   ──► Transformer Landmark Encoder + Pretrained T5-small Decoder
-            │
-            ▼
- [Translation Results]     ──► Streamed back to Dashboard UI (Current Banner + Transcript)
-```
+- **Hearing signs: …** words recognised so far while signing (`live_words`).
+- **Translation** the English sentence when the sentence ends (~1.4 s pause or hands down), with each recognised
+  word and its confidence.
+- **Vocabulary panel** the words the server currently recognises (`/api/vocab`).
+- **HUD** hand detection, motion level and buffered frames, for checking the camera set-up.
 
----
+Camera access needs `http://localhost` or HTTPS. For other devices use a Cloudflare tunnel; see
+[docs/DEMO_GUIDE.md](../docs/DEMO_GUIDE.md). Message formats are in [docs/API.md](../docs/API.md).
 
-## Features
-
-1. **Client-Side Landmark Extraction (Zero Video Upload)**:
-   - Video is processed directly in the user's browser via MediaPipe Holistic JS.
-   - Raw video frames never leave the client's machine, ensuring privacy and minimal network bandwidth.
-   - Bit-exact mathematical parity with `src/extract/normalize.py` verified by `tests/test_js_python_parity.py`.
-
-2. **Online Sentence Boundary Detection (`ContinuousSignSegmenter`)**:
-   - Automatically cuts continuous signing into discrete sentences based on hand presence, wrist elevation drops, and low-motion pauses.
-   - No manual start/stop button clicks required during continuous natural signing.
-
-3. **Sub-2-Second End-to-End Latency**:
-   - Transformer Landmark Encoder + learned projection + T5 text decoder runs in ~1.0s on GPU with beam width 5 (and ~120ms with greedy search).
-   - Real-time compliance verified against the $< 2.0$s target.
-
-4. **Webcam, IP Webcam, and Simulation Modes**:
-   - **Live Local Webcam**: Real-time sign language capture directly from a built-in/USB webcam with landmark visualization canvas.
-   - **IP Webcam (Android / Network Camera)**: Connect a phone running the IP Webcam app (pre-configured for `http://172.15.45.93:8080/video`). The FastAPI server proxies the MJPEG stream on the same origin (`/api/ipcam/stream`) so MediaPipe Holistic JS runs cleanly without CORS/tainted-canvas errors.
-   - **Clip Simulator**: Select and stream pre-extracted How2Sign validation/test clips frame-by-frame at 15 fps to evaluate translation without requiring a live camera.
-
----
-
-## Launching the Application
-
-### 1. Start the Server
-
-Using the `Makefile` shortcut:
-```bash
-make serve
-```
-
-Or run the CLI directly:
-```bash
-.venv/bin/python src/serve/server.py --port 8000 --model-type t5
-```
-
-Options:
-- `--host`: Host interface to bind (default `0.0.0.0`)
-- `--port`: Port number (default `8000`)
-- `--model-type`: `t5`, `transformer`, or `lstm` (default `t5`)
-- `--checkpoint`: Path to model weights (default `checkpoints/t5/best_model.pt`)
-- `--beam-size`: Beam search width (default `5`)
-- `--pause-frames`: Number of rest frames to trigger sentence boundary (default `12`)
-- `--ipcam-url`: Default IP Webcam stream URL pre-filled in the dashboard (default `http://172.15.45.93:8080/video`)
-
-### 2. Open in Browser
-
-Open Google Chrome or any modern WebGL-compatible browser:
-```
-http://localhost:8000
-```
-
----
-
-## Testing & Parity Verification
-
-Run parity and pipeline tests:
-```bash
-.venv/bin/pytest -v tests/test_js_python_parity.py
-```
+If you change the normalisation in `landmarks.js`, change `src/extract/normalize.py` the same way and run
+`pytest tests/test_js_python_parity.py`. The models were trained on the Python features, so any mismatch silently
+breaks recognition.
