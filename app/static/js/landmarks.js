@@ -78,7 +78,9 @@ export class LandmarkNormalizer {
     let offset = 0;
 
     // Helper to normalize and push landmarks
-    const pushNormalized = (landmarks, indices, numPts) => {
+    // useVis=false for hands/face: MediaPipe gives them no visibility; the Python
+    // training pipeline stores 0.0 there, so the browser must too (train/serve parity).
+    const pushNormalized = (landmarks, indices, numPts, useVis = false) => {
       for (let i = 0; i < numPts; i++) {
         const idx = indices ? indices[i] : i;
         const lm = (landmarks && landmarks[idx]) ? landmarks[idx] : null;
@@ -86,7 +88,7 @@ export class LandmarkNormalizer {
           staticVec[offset++] = (lm.x - midX) / scale;
           staticVec[offset++] = (lm.y - midY) / scale;
           staticVec[offset++] = (lm.z - midZ) / scale;
-          staticVec[offset++] = lm.visibility !== undefined ? lm.visibility : 1.0;
+          staticVec[offset++] = useVis ? (lm.visibility !== undefined ? lm.visibility : 1.0) : 0.0;
         } else {
           staticVec[offset++] = 0.0;
           staticVec[offset++] = 0.0;
@@ -97,7 +99,7 @@ export class LandmarkNormalizer {
     };
 
     // 2. Pose subset (17 points * 4 = 68)
-    pushNormalized(poseLandmarks, POSE_INDICES, POSE_INDICES.length);
+    pushNormalized(poseLandmarks, POSE_INDICES, POSE_INDICES.length, true);
 
     // 3. Hands shoulder-normalized (21 * 4 = 84 each)
     const lhStart = offset;

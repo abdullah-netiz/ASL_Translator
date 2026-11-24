@@ -76,6 +76,8 @@ def normalize_sequence(
     T = len(frames)
 
     static_vecs: list[np.ndarray] = []
+    last_mid: np.ndarray | None = None
+    last_scale: float = 1.0
 
     for fr in frames:
         pose_full: np.ndarray = fr["pose"]        # (33, 4)
@@ -85,16 +87,34 @@ def normalize_sequence(
         lh_det = float(fr["left_hand_detected"])
         rh_det = float(fr["right_hand_detected"])
 
-        mid   = _shoulder_mid(pose_full, l_sh, r_sh)
-        scale = _shoulder_width(pose_full, l_sh, r_sh)
+        pose_ok = bool(fr.get("pose_detected", True)) and float(
+            np.linalg.norm(pose_full[l_sh, :3] - pose_full[r_sh, :3])
+        ) > 1e-3
+        if pose_ok:
+            mid   = _shoulder_mid(pose_full, l_sh, r_sh)
+            scale = _shoulder_width(pose_full, l_sh, r_sh)
+            last_mid, last_scale = mid, scale
+        elif last_mid is not None:
+            # Pose lost: carry the last good reference forward (no 1e-6 blow-up)
+            mid, scale = last_mid, last_scale
+        else:
+            mid, scale = np.zeros(3, dtype=np.float32), 1.0
 
         # Pose subset — shoulder-normalized
         pose_sub  = pose_full[pose_indices, :]     # (n_pose, 4)
         pose_norm = _shoulder_normalize(pose_sub, mid, scale)
+        if not pose_ok:
+            pose_norm[:] = 0.0
 
         # Hands — shoulder-normalized
         lh_norm = _shoulder_normalize(lh_full, mid, scale)  # (21, 4)
         rh_norm = _shoulder_normalize(rh_full, mid, scale)  # (21, 4)
+        # FIX: an undetected hand is all-zeros in raw space, which normalization
+        # would turn into a fake hand at (-mid/scale). Keep it exactly zero.
+        if not lh_det:
+            lh_norm[:] = 0.0
+        if not rh_det:
+            rh_norm[:] = 0.0
 
         # Wrist-relative hand streams (extra hand-shape representation)
         # landmark 0 of each hand = wrist in shoulder-normalized space
@@ -111,6 +131,8 @@ def normalize_sequence(
             padded[: face_full.shape[0]] = face_full
             face_sub = padded[face_indices, :]
         face_norm = _shoulder_normalize(face_sub, mid, scale)  # (n_face, 4)
+        if not np.any(face_full):
+            face_norm[:] = 0.0
 
         vec = np.concatenate([
             pose_norm.ravel(),       # n_pose * 4

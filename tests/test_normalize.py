@@ -133,3 +133,18 @@ def test_normalize_sequence_max_len_truncation(dummy_lm_cfg):
     frames = [make_dummy_frame() for _ in range(20)]
     arr = normalize_sequence(frames, dummy_lm_cfg, max_seq_len=8)
     assert arr.shape == (8, 1200)
+
+
+def test_undetected_hand_stays_exactly_zero():
+    """Regression: an undetected hand (all-zero raw) used to become a fake hand at -mid/scale."""
+    import numpy as np, yaml
+    from src.extract.normalize import normalize_sequence
+    cfg = yaml.safe_load(open("configs/landmarks.yaml"))
+    pose = np.zeros((33, 4), np.float32); pose[11] = [0.6, 0.5, 0, 1]; pose[12] = [0.4, 0.5, 0, 1]
+    fr = {"pose": pose, "left_hand": np.zeros((21, 4), np.float32), "right_hand": np.zeros((21, 4), np.float32),
+          "face": np.zeros((468, 4), np.float32), "left_hand_detected": False, "right_hand_detected": False,
+          "pose_detected": True}
+    out = normalize_sequence([fr, fr], cfg).astype(np.float32)
+    assert np.all(out[:, 68:236] == 0)          # both hands exactly zero
+    assert np.all(out[:, 472:600] == 0)         # wrist-relative + presence flags zero
+    assert np.isfinite(out).all()
